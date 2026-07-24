@@ -826,6 +826,7 @@ function App() {
         <main className="store-home">
           <Hero
             onShop={() => shopCategory("All products")}
+            onCategory={shopCategory}
             settings={storeSettings}
             catalogCount={catalog.length}
             onProduct={(id) => {
@@ -1476,7 +1477,7 @@ function MobileDock({
   );
 }
 
-function Hero({ onShop, settings, catalogCount, onProduct }) {
+function Hero({ onShop, onCategory, settings, catalogCount, onProduct }) {
   return (
     <section className="hero">
       <div className="hero-backdrop" aria-hidden="true" />
@@ -1493,15 +1494,28 @@ function Hero({ onShop, settings, catalogCount, onProduct }) {
             <span>Beautifully solved.</span>
           </h1>
           <p>
-            Thoughtful products for the moments that quietly slow you
-            down—from protecting your car to building better habits.
+            Car protection, reflective styling, stickers and labels, planning
+            trackers, and business supplies—made practical for everyday use.
           </p>
+          <nav className="hero-category-nav" aria-label="Shop product categories">
+            <div>
+              {CATEGORIES.slice(1).map((category) => (
+                <button
+                  key={category}
+                  type="button"
+                  onClick={() => onCategory(category)}
+                >
+                  {category}
+                </button>
+              ))}
+            </div>
+          </nav>
           <div className="hero-actions">
             <button className="button button-primary" type="button" onClick={onShop}>
-              Discover what’s useful <ArrowRight size={18} />
+              Shop all products <ArrowRight size={18} />
             </button>
             <a className="hero-secondary-link" href="#collections">
-              Browse by need <ArrowRight size={16} />
+              View collections <ArrowRight size={16} />
             </a>
           </div>
           <div className="hero-proof">
