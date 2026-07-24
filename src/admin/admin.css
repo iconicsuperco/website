@@ -216,6 +216,12 @@ body.admin-overlay-open {
   box-shadow: 0 0 0 3px rgba(7, 26, 70, 0.07);
 }
 
+.admin-status-control select:disabled {
+  cursor: not-allowed;
+  background: #f3f5f7;
+  color: #7a8495;
+}
+
 .admin-primary-btn {
   display: inline-flex;
   min-height: 46px;
@@ -818,6 +824,11 @@ body.admin-overlay-open {
 .admin-status--refunded {
   background: #fff0ef;
   color: #a13931;
+}
+
+.admin-status--inventory_attention {
+  background: #fff0e8;
+  color: #9d352c;
 }
 
 .admin-readiness-row {
@@ -2204,6 +2215,62 @@ body.admin-overlay-open {
   background: #f4f6f2;
   color: #697589;
   font-size: 0.65rem;
+}
+
+.admin-order-state-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 11px;
+}
+
+.admin-order-state-grid p {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 9px;
+  border-radius: 8px;
+  background: #f4f6f2;
+}
+
+.admin-order-state-grid span {
+  color: #697589;
+  font-size: 0.58rem;
+}
+
+.admin-order-state-grid strong {
+  color: var(--admin-navy);
+  font-size: 0.66rem;
+}
+
+.admin-inventory-attention {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 11px;
+  padding: 10px;
+  border: 1px solid #f0c7c3;
+  border-radius: 8px;
+  background: #fff7f4;
+  color: #8f342d;
+  font-size: 0.65rem;
+  line-height: 1.5;
+}
+
+.admin-inventory-attention svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.admin-inventory-attention p,
+.admin-inventory-attention strong {
+  display: block;
+  margin: 0;
+}
+
+.admin-inventory-attention strong {
+  color: #742820;
+  font-size: 0.68rem;
 }
 
 @media (max-width: 760px) {

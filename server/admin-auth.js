@@ -5,7 +5,6 @@ const SESSION_DURATION_SECONDS = 60 * 60 * 8;
 
 const signingSecret = () =>
   process.env.ADMIN_SESSION_SECRET ||
-  process.env.ADMIN_PASSWORD ||
   (process.env.NODE_ENV !== "production"
     ? "kelenate-admin-development-session"
     : null);
@@ -70,9 +69,10 @@ const cookieOptions = (maxAge = SESSION_DURATION_SECONDS) => {
 
 export const loginAdmin = (request, response) => {
   const password = configuredPassword();
-  if (!password) {
+  if (!password || !signingSecret()) {
     response.status(503).json({
-      message: "Set ADMIN_PASSWORD before using the admin panel.",
+      message:
+        "Set ADMIN_PASSWORD and a separate ADMIN_SESSION_SECRET before using the admin panel.",
     });
     return;
   }

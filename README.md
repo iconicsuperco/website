@@ -23,14 +23,19 @@ npm run dev
 ```
 
 `npm run dev` starts both the storefront and commerce/admin API. Keep that
-terminal open while using the website or admin panel. The frontend falls back
-to preview checkout when payment credentials are not configured.
+terminal open while using the website or admin panel. Local development can use
+a clearly labelled preview checkout when no commerce API URL is configured.
+Production fails closed: missing API configuration or unavailable payment
+methods disable checkout instead of pretending to accept an order.
 
-Set `VITE_COMMERCE_API_URL=http://localhost:8787/api` in `.env`, then restart
-the development command. The production build is created with:
+Set `VITE_COMMERCE_API_URL=http://localhost:8787/api` in `.env` to exercise the
+real local API, then restart the development command. A same-origin production
+deployment automatically uses `/api`; set the variable only when the API lives
+on another origin. The production build is created with:
 
 ```bash
 npm run build
+npm test
 npm start
 ```
 
@@ -56,29 +61,50 @@ The panel currently supports:
   contact details;
 - low-stock visibility and live Razorpay/Shiprocket configuration status.
 
-Products, orders and store settings are persisted under `server/data/` for
-this local build. Shipping and support changes saved in the admin panel are
-also returned to the storefront and shipping values are enforced again by the
-checkout server. For production, connect these stores to the deployment
-database so data remains durable across server restarts and multiple instances.
+Products, orders, webhook receipts and store settings are persisted under
+`server/data/` for this single-process local build. Writes are serialized,
+inventory operations are idempotent per order, and checkout retries reuse the
+same order. Shipping and support changes saved in the admin panel are also
+returned to the storefront and shipping values are enforced again by the
+checkout server.
+
+The JSON stores are a hardened development bridge, not a production database.
+They do not coordinate across multiple server instances. Before real traffic,
+move orders, payments, inventory movements, webhook events and shipment jobs to
+a transactional database with unique constraints.
 
 ## Before accepting real orders
 
-1. Replace the local admin password and session secret.
-2. Add live or test Razorpay keys to `.env`.
-3. Add the Shiprocket API-user credentials and exact pickup-location name.
-4. Import product weights and packed dimensions from the upcoming seller CSV.
-   Until measurements are configured, paid/COD orders are recorded and marked
-   `shipment_pending` instead of sending guessed parcel data to Shiprocket.
-5. Put the API and storefront behind HTTPS, set `STORE_ORIGIN`, and replace the
-   local JSON order store with the production database used by the hosting
-   environment.
-6. Have the client approve the drafted shipping, return, privacy, and sale
-   terms before launch.
+1. Use a long private `ADMIN_PASSWORD` and a separate random
+   `ADMIN_SESSION_SECRET`. `npm start` runs in production mode and has no
+   development-password fallback.
+2. Start with Razorpay Test keys. Configure the Razorpay webhook URL as
+   `/api/webhooks/razorpay`, set its dedicated secret, and subscribe to
+   `order.paid`, `payment.captured`, `payment.failed`, `refund.created`,
+   `refund.processed` and `refund.failed`.
+3. Exercise successful, failed, dismissed and delayed-payment paths, then run
+   `npm test`. Replace Test keys and the Test webhook with Live configuration
+   only after this passes.
+4. Add the Shiprocket API-user credentials and exact pickup-location name.
+   Import SKU-level weights and packed dimensions from the upcoming seller CSV.
+   Until courier configuration is complete, shipment creation fails closed and
+   remains visible for manual attention.
+5. Keep `ENABLE_COD=false` until COD serviceability, customer verification and
+   an operating process for rejected/RTO orders are approved.
+6. Put the API and storefront behind HTTPS, set the exact `STORE_ORIGIN`, set
+   `TRUST_PROXY=true` only behind the trusted first proxy, and replace the JSON
+   stores with the production transactional database.
+7. Have the client approve the drafted shipping, return, privacy, refund and
+   sale terms before launch. Cancelling a captured online order marks its refund
+   as pending; the refund must be issued through the approved Razorpay process,
+   and its webhook closes the lifecycle.
 
-Razorpay and Shiprocket secrets stay server-side. The server re-prices every
-cart from the local catalog, verifies Razorpay signatures, and never trusts
-prices sent by the browser.
+Razorpay and Shiprocket secrets stay server-side. The server aggregates
+duplicate cart lines, re-prices every cart from the active catalog, requires a
+checkout idempotency key, verifies the checkout signature against the stored
+provider order, confirms captured amount/currency/status with Razorpay, and
+also processes signed, deduplicated raw-body webhooks. Stock and shipment work
+are guarded so replayed callbacks cannot fulfil the same payment twice.
 
 ## Catalog notes
 

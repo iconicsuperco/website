@@ -1,7 +1,9 @@
-const catalogEndpoint = () => {
-  const configured = import.meta.env.VITE_COMMERCE_API_URL?.replace(/\/$/, "");
-  return `${configured || "/api"}/catalog`;
-};
+const configuredCommerceApi =
+  import.meta.env.VITE_COMMERCE_API_URL?.replace(/\/$/, "");
+const localPreview = import.meta.env.DEV && !configuredCommerceApi;
+
+const catalogEndpoint = () =>
+  `${configuredCommerceApi || "/api"}/catalog`;
 
 export const DEFAULT_STOREFRONT_SETTINGS = {
   shipping: {
@@ -17,6 +19,11 @@ export const DEFAULT_STOREFRONT_SETTINGS = {
   returns: {
     windowDays: 7,
   },
+};
+
+export const DEFAULT_COMMERCE_CAPABILITIES = {
+  onlinePayment: localPreview,
+  cod: localPreview,
 };
 
 const withDefaults = (settings = {}) => ({
@@ -36,6 +43,17 @@ const withDefaults = (settings = {}) => ({
   },
 });
 
+const withCapabilityDefaults = (capabilities = {}) =>
+  localPreview
+    ? DEFAULT_COMMERCE_CAPABILITIES
+    : {
+        onlinePayment:
+          typeof capabilities.onlinePayment === "boolean"
+            ? capabilities.onlinePayment
+            : false,
+        cod: typeof capabilities.cod === "boolean" ? capabilities.cod : false,
+      };
+
 export async function loadCatalog() {
   const response = await fetch(catalogEndpoint(), {
     cache: "no-store",
@@ -49,5 +67,6 @@ export async function loadCatalog() {
   return {
     products: result.products,
     settings: withDefaults(result.settings),
+    capabilities: withCapabilityDefaults(result.capabilities),
   };
 }

@@ -1,11 +1,16 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { HttpError } from "./http-error.js";
 import { PRODUCTS } from "../src/data/products.js";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const dataDirectory = path.join(currentDirectory, "data");
-const productsFile = path.join(dataDirectory, "products.json");
+const productsFile = process.env.PRODUCTS_DATA_FILE
+  ? path.resolve(process.env.PRODUCTS_DATA_FILE)
+  : path.join(dataDirectory, "products.json");
+let productMutationQueue = Promise.resolve();
 
 const seedProducts = () => {
   const timestamp = new Date().toISOString();
@@ -20,7 +25,11 @@ const seedProducts = () => {
 
 const readProductRecords = async () => {
   try {
-    return JSON.parse(await fs.readFile(productsFile, "utf8"));
+    const value = JSON.parse(await fs.readFile(productsFile, "utf8"));
+    if (!Array.isArray(value)) {
+      throw new Error("The product store must contain a JSON array.");
+    }
+    return value;
   } catch (error) {
     if (error.code === "ENOENT") return seedProducts();
     throw error;
@@ -28,10 +37,33 @@ const readProductRecords = async () => {
 };
 
 const writeProductRecords = async (products) => {
-  await fs.mkdir(dataDirectory, { recursive: true });
-  const temporaryFile = `${productsFile}.tmp`;
-  await fs.writeFile(temporaryFile, JSON.stringify(products, null, 2));
+  await fs.mkdir(path.dirname(productsFile), { recursive: true });
+  const temporaryFile = `${productsFile}.${process.pid}.${crypto
+    .randomBytes(5)
+    .toString("hex")}.tmp`;
+  await fs.writeFile(temporaryFile, JSON.stringify(products, null, 2), {
+    mode: 0o600,
+  });
   await fs.rename(temporaryFile, productsFile);
+};
+
+const mutateProducts = (task) => {
+  const mutation = productMutationQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const products = await readProductRecords();
+      const result = await task(products);
+      await writeProductRecords(products);
+      return result;
+    });
+  productMutationQueue = mutation;
+  return mutation;
+};
+
+const publicProduct = (product) => {
+  const { _inventoryTransactions: _privateTransactions, ...publicFields } =
+    product;
+  return publicFields;
 };
 
 const slugify = (value) =>
@@ -78,14 +110,29 @@ const normalizeProduct = (input, existing = {}) => {
   const price = Number(input.price);
   const mrp = Number(input.mrp);
   const inventory = Number(input.inventory);
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("A valid selling price is required.");
+  const rating =
+    input.rating === "" || input.rating == null ? null : Number(input.rating);
+  const reviews = Number(input.reviews || 0);
+  if (!Number.isSafeInteger(price) || price <= 0 || price > 10_000_000) {
+    throw new Error("Selling price must be a whole rupee amount.");
   }
-  if (!Number.isFinite(mrp) || mrp < price) {
-    throw new Error("MRP must be equal to or higher than the selling price.");
+  if (
+    !Number.isSafeInteger(mrp) ||
+    mrp < price ||
+    mrp > 10_000_000
+  ) {
+    throw new Error(
+      "MRP must be a whole rupee amount equal to or above the selling price.",
+    );
   }
   if (!Number.isInteger(inventory) || inventory < 0) {
     throw new Error("Inventory must be a whole number of zero or more.");
+  }
+  if (rating != null && (!Number.isFinite(rating) || rating < 0 || rating > 5)) {
+    throw new Error("Rating must be between 0 and 5.");
+  }
+  if (!Number.isSafeInteger(reviews) || reviews < 0) {
+    throw new Error("Ratings count must be a whole number of zero or more.");
   }
 
   const name = requiredText(input.name, "Product name");
@@ -98,9 +145,8 @@ const normalizeProduct = (input, existing = {}) => {
     category: requiredText(input.category, "Category"),
     price,
     mrp,
-    rating:
-      input.rating === "" || input.rating == null ? null : Number(input.rating),
-    reviews: Number(input.reviews || 0),
+    rating,
+    reviews,
     image: requiredText(input.image, "Product image"),
     badge: String(input.badge || "New").trim(),
     featured: Boolean(input.featured),
@@ -115,13 +161,13 @@ const normalizeProduct = (input, existing = {}) => {
 
 export const getProducts = async ({ includeInactive = false } = {}) => {
   const products = await readProductRecords();
-  return includeInactive
+  const selected = includeInactive
     ? products
     : products.filter((product) => product.active !== false);
+  return selected.map(publicProduct);
 };
 
-export const createProduct = async (input) => {
-  const products = await readProductRecords();
+export const createProduct = (input) => mutateProducts((products) => {
   const product = normalizeProduct(input);
   if (!product.id) throw new Error("A valid product name is required.");
   if (products.some((entry) => entry.id === product.id)) {
@@ -129,21 +175,17 @@ export const createProduct = async (input) => {
   }
   product.createdAt = product.updatedAt;
   products.unshift(product);
-  await writeProductRecords(products);
-  return product;
-};
+  return publicProduct(product);
+});
 
-export const updateProduct = async (productId, input) => {
-  const products = await readProductRecords();
+export const updateProduct = (productId, input) => mutateProducts((products) => {
   const index = products.findIndex((product) => product.id === productId);
   if (index === -1) throw new Error("Product not found.");
   products[index] = normalizeProduct(input, products[index]);
-  await writeProductRecords(products);
-  return products[index];
-};
+  return publicProduct(products[index]);
+});
 
-export const archiveProduct = async (productId) => {
-  const products = await readProductRecords();
+export const archiveProduct = (productId) => mutateProducts((products) => {
   const index = products.findIndex((product) => product.id === productId);
   if (index === -1) throw new Error("Product not found.");
   products[index] = {
@@ -151,26 +193,114 @@ export const archiveProduct = async (productId) => {
     active: false,
     updatedAt: new Date().toISOString(),
   };
-  await writeProductRecords(products);
-  return products[index];
+  return publicProduct(products[index]);
+});
+
+const aggregateInventoryItems = (items) => {
+  const quantities = new Map();
+  for (const item of items || []) {
+    const quantity = Number(item.quantity);
+    if (!item.id || !Number.isInteger(quantity) || quantity < 1) {
+      throw new HttpError(
+        400,
+        "INVALID_INVENTORY_ITEMS",
+        "One or more inventory items are invalid.",
+      );
+    }
+    quantities.set(item.id, (quantities.get(item.id) || 0) + quantity);
+  }
+  return [...quantities].map(([id, quantity]) => {
+    const source = items.find((item) => item.id === id);
+    return { ...source, id, quantity };
+  });
 };
 
-export const decrementInventory = async (items) => {
-  const products = await readProductRecords();
-  for (const item of items) {
-    const product = products.find((entry) => entry.id === item.id);
-    if (!product || Number(product.inventory || 0) < item.quantity) {
-      throw new Error(`${item.name} no longer has enough stock.`);
+const applyInventoryTransaction = (
+  items,
+  { transactionId, direction },
+) =>
+  mutateProducts((products) => {
+    const aggregated = aggregateInventoryItems(items);
+    const operationId = `${direction}:${transactionId}`;
+    const operationStates = aggregated.map((item) => {
+      const product = products.find((entry) => entry.id === item.id);
+      return Boolean(product?._inventoryTransactions?.includes(operationId));
+    });
+    if (operationStates.every(Boolean)) {
+      return { applied: false, transactionId };
     }
+    if (operationStates.some(Boolean)) {
+      throw new HttpError(
+        409,
+        "PARTIAL_INVENTORY_TRANSACTION",
+        "Inventory needs manual reconciliation for this order.",
+      );
+    }
+
+    for (const item of aggregated) {
+      const product = products.find((entry) => entry.id === item.id);
+      if (!product) {
+        throw new HttpError(
+          409,
+          "PRODUCT_NOT_FOUND",
+          `${item.name || "A product"} is no longer available.`,
+        );
+      }
+      if (
+        direction === "commit" &&
+        Number(product.inventory || 0) < item.quantity
+      ) {
+        throw new HttpError(
+          409,
+          "INSUFFICIENT_STOCK",
+          `${item.name} no longer has enough stock.`,
+        );
+      }
+    }
+
+    const updatedAt = new Date().toISOString();
+    for (const item of aggregated) {
+      const index = products.findIndex((entry) => entry.id === item.id);
+      const current = products[index];
+      products[index] = {
+        ...current,
+        inventory:
+          Number(current.inventory || 0) +
+          (direction === "release" ? item.quantity : -item.quantity),
+        _inventoryTransactions: [
+          ...(current._inventoryTransactions || []),
+          operationId,
+        ],
+        updatedAt,
+      };
+    }
+    return { applied: true, transactionId };
+  });
+
+export const decrementInventory = (items, { transactionId } = {}) => {
+  if (!transactionId) {
+    throw new HttpError(
+      500,
+      "INVENTORY_TRANSACTION_REQUIRED",
+      "Inventory could not be updated safely.",
+    );
   }
-  const updatedAt = new Date().toISOString();
-  for (const item of items) {
-    const index = products.findIndex((entry) => entry.id === item.id);
-    products[index] = {
-      ...products[index],
-      inventory: Number(products[index].inventory || 0) - item.quantity,
-      updatedAt,
-    };
+  return applyInventoryTransaction(items, {
+    transactionId,
+    direction: "commit",
+  });
+};
+
+export const restoreInventory = (items, { transactionId } = {}) => {
+  if (!transactionId) {
+    throw new HttpError(
+      500,
+      "INVENTORY_TRANSACTION_REQUIRED",
+      "Inventory could not be restored safely.",
+    );
   }
-  await writeProductRecords(products);
+  return applyInventoryTransaction(items, {
+    transactionId,
+    direction: "release",
+  });
 };

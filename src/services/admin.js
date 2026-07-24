@@ -5,11 +5,11 @@ async function adminRequest(path, options = {}) {
   try {
     response = await fetch(`${API_ROOT}${path}`, {
       credentials: "include",
+      ...options,
       headers:
         options.body instanceof FormData
           ? options.headers
           : { "Content-Type": "application/json", ...options.headers },
-      ...options,
     });
   } catch {
     throw new Error(
@@ -25,6 +25,7 @@ async function adminRequest(path, options = {}) {
           : "Admin request failed."),
     );
     error.status = response.status;
+    error.code = result.code;
     throw error;
   }
   return result;
@@ -51,10 +52,11 @@ export const saveAdminSettings = (settings) =>
     body: JSON.stringify(settings),
   });
 
-export const updateAdminOrder = (orderId, status) =>
+export const updateAdminOrder = (orderId, status, version) =>
   adminRequest(`/orders/${encodeURIComponent(orderId)}`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    headers: { "If-Match": `"${version}"` },
+    body: JSON.stringify({ status, version }),
   });
 
 export const saveAdminProduct = (product, productId) =>

@@ -2,6 +2,17 @@ const lookupCache = new Map();
 const LOOKUP_TIMEOUT_MS = 4500;
 const SUCCESS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NOT_FOUND_CACHE_TTL_MS = 60 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 1000;
+const POSTAL_API_URL = String(
+  process.env.PINCODE_API_URL || "https://api.postalpincode.in/pincode",
+).replace(/\/$/, "");
+
+const saveLookup = (pincode, value) => {
+  if (lookupCache.size >= MAX_CACHE_ENTRIES && !lookupCache.has(pincode)) {
+    lookupCache.delete(lookupCache.keys().next().value);
+  }
+  lookupCache.set(pincode, { value, savedAt: Date.now() });
+};
 
 const cachedLookup = (pincode) => {
   const cached = lookupCache.get(pincode);
@@ -27,7 +38,7 @@ export async function lookupIndianPincode(pincode) {
 
   try {
     const response = await fetch(
-      `https://api.postalpincode.in/pincode/${normalized}`,
+      `${POSTAL_API_URL}/${normalized}`,
       {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
@@ -44,7 +55,7 @@ export async function lookupIndianPincode(pincode) {
       : [];
 
     if (result?.Status !== "Success" || offices.length === 0) {
-      lookupCache.set(normalized, { value: null, savedAt: Date.now() });
+      saveLookup(normalized, null);
       return null;
     }
 
@@ -61,7 +72,7 @@ export async function lookupIndianPincode(pincode) {
         (entry) => entry.DeliveryStatus === "Delivery",
       ).length,
     };
-    lookupCache.set(normalized, { value, savedAt: Date.now() });
+    saveLookup(normalized, value);
     return value;
   } catch (error) {
     if (error.code === "INVALID_PINCODE") throw error;
@@ -72,3 +83,5 @@ export async function lookupIndianPincode(pincode) {
     throw unavailable;
   }
 }
+
+export const resetPincodeCache = () => lookupCache.clear();

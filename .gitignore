@@ -2,9 +2,9 @@ node_modules/
 dist/
 .env
 server/data/orders.json
-server/data/orders.json.tmp
 server/data/products.json
-server/data/products.json.tmp
+server/data/webhook-events.json
+server/data/*.tmp
 public/uploads/*
 .DS_Store
 playwright-report/

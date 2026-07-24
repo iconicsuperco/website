@@ -78,6 +78,7 @@ const STATUS_OPTIONS = [
   "processing",
   "shipped",
   "delivered",
+  "inventory_attention",
   "cancelled",
   "refunded",
 ];
@@ -88,10 +89,15 @@ const ACTION_ORDER_STATUSES = new Set([
   "shipment_pending",
   "shipment_created",
   "processing",
+  "inventory_attention",
 ]);
 
 const COMPLETED_ORDER_STATUSES = new Set(["shipped", "delivered"]);
 const CLOSED_ORDER_STATUSES = new Set(["cancelled", "refunded"]);
+const orderNeedsAction = (order) =>
+  order.inventoryStatus === "attention" ||
+  order.refundStatus === "failed" ||
+  ACTION_ORDER_STATUSES.has(order.status);
 
 const statusLabel = (status = "") =>
   status
@@ -298,13 +304,13 @@ function AdminShell({ onSignedOut }) {
     onSignedOut();
   };
 
-  const updateOrder = async (orderId, status) => {
-    const result = await updateAdminOrder(orderId, status);
+  const updateOrder = async (orderId, status, version) => {
+    const result = await updateAdminOrder(orderId, status, version);
     setOrders((current) =>
       current.map((order) => (order.orderId === orderId ? result.order : order)),
     );
     setSelectedOrder(result.order);
-    setToast(`Order ${orderId} updated`);
+    setToast(result.warning || `Order ${orderId} updated`);
     await loadData(true);
   };
 
@@ -635,6 +641,11 @@ function Overview({ dashboard, openOrder, goTo }) {
             ready={dashboard?.integrations?.razorpay}
           />
           <ReadinessRow
+            icon={ShieldCheck}
+            label="Razorpay webhook"
+            ready={dashboard?.integrations?.razorpayWebhook}
+          />
+          <ReadinessRow
             icon={Truck}
             label="Shiprocket account"
             ready={dashboard?.integrations?.shiprocket}
@@ -678,8 +689,7 @@ function Orders({ orders, openOrder }) {
   const counts = useMemo(
     () => ({
       all: orders.length,
-      action: orders.filter((order) => ACTION_ORDER_STATUSES.has(order.status))
-        .length,
+      action: orders.filter(orderNeedsAction).length,
       completed: orders.filter((order) =>
         COMPLETED_ORDER_STATUSES.has(order.status),
       ).length,
@@ -694,7 +704,7 @@ function Orders({ orders, openOrder }) {
       const matchesStatus =
         status === "all" ||
         order.status === status ||
-        (status === "action" && ACTION_ORDER_STATUSES.has(order.status)) ||
+        (status === "action" && orderNeedsAction(order)) ||
         (status === "completed" &&
           COMPLETED_ORDER_STATUSES.has(order.status)) ||
         (status === "closed" && CLOSED_ORDER_STATUSES.has(order.status));
@@ -1284,6 +1294,11 @@ function StoreSettings({ settings, save }) {
             ready={settings?.integrations?.razorpay}
           />
           <ReadinessRow
+            icon={ShieldCheck}
+            label="Razorpay webhook"
+            ready={settings?.integrations?.razorpayWebhook}
+          />
+          <ReadinessRow
             icon={Truck}
             label="Shiprocket"
             ready={settings?.integrations?.shiprocket}
@@ -1507,10 +1522,18 @@ function ProductEditor({ product, categories, close, save }) {
 }
 
 function OrderDetail({ order, close, update }) {
-  const [status, setStatus] = useState(order.status);
+  const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const allowedTransitions = Array.isArray(order.allowedTransitions)
+    ? order.allowedTransitions
+    : [];
+
+  useEffect(() => {
+    setStatus("");
+    setError("");
+  }, [order.orderId, order.version]);
 
   const copyOrderId = async () => {
     try {
@@ -1526,7 +1549,7 @@ function OrderDetail({ order, close, update }) {
     setBusy(true);
     setError("");
     try {
-      await update(order.orderId, status);
+      await update(order.orderId, status, order.version);
     } catch (updateError) {
       setError(updateError.message);
     } finally {
@@ -1616,16 +1639,68 @@ function OrderDetail({ order, close, update }) {
             <p><span>Total</span><strong>{formatCurrency(order.total)}</strong></p>
           </section>
           <section>
+            <h3>Payment & refund</h3>
+            <div className="admin-order-state-grid">
+              <p>
+                <span>Payment</span>
+                <strong>{statusLabel(order.paymentStatus || "pending")}</strong>
+              </p>
+              <p>
+                <span>Fulfilment</span>
+                <strong>{statusLabel(order.fulfillmentStatus || "unfulfilled")}</strong>
+              </p>
+              <p>
+                <span>Refund</span>
+                <strong>{statusLabel(order.refundStatus || "none")}</strong>
+              </p>
+            </div>
+            {["pending", "failed"].includes(order.refundStatus) && (
+              <div className="admin-inventory-attention" role="alert">
+                <AlertTriangle size={18} />
+                <p>
+                  <strong>Refund action required</strong>
+                  Cancelling the order does not issue money automatically.
+                  Complete or reconcile the refund in Razorpay; its signed
+                  webhook will update this order.
+                </p>
+              </div>
+            )}
+          </section>
+          <section>
             <h3>Fulfilment status</h3>
             <div className="admin-current-status">
               <span>Current status</span>
               <StatusPill status={order.status} />
             </div>
+            {order.inventoryStatus === "attention" && (
+              <div className="admin-inventory-attention" role="alert">
+                <AlertTriangle size={18} />
+                <p>
+                  <strong>Inventory needs review</strong>
+                  Stock could not be reconciled automatically. Check the affected
+                  items before promising fulfilment or refund timing.
+                </p>
+              </div>
+            )}
             <div className="admin-status-control">
-              <select value={status} onChange={(event) => setStatus(event.target.value)}>
-                {STATUS_OPTIONS.map((option) => <option key={option} value={option}>{statusLabel(option)}</option>)}
+              <select
+                value={status}
+                onChange={(event) => setStatus(event.target.value)}
+                disabled={busy || allowedTransitions.length === 0}
+                aria-label="Next fulfilment status"
+              >
+                <option value="" disabled>
+                  {allowedTransitions.length
+                    ? "Choose next status"
+                    : "No further status changes"}
+                </option>
+                {allowedTransitions.map((option) => (
+                  <option key={option} value={option}>
+                    {statusLabel(option)}
+                  </option>
+                ))}
               </select>
-              <button className="admin-primary-btn" type="button" onClick={submitStatus} disabled={busy || status === order.status}>
+              <button className="admin-primary-btn" type="button" onClick={submitStatus} disabled={busy || !status}>
                 {busy ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} Update
               </button>
             </div>

@@ -5,150 +5,234 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import adminRouter from "./admin-routes.js";
 import {
-  createOrderRecord,
-  findOrder,
-  updateOrderRecord,
-} from "./order-store.js";
-import { decrementInventory, getProducts } from "./product-store.js";
+  codCheckoutEnabled,
+  onlineCheckoutEnabled,
+  startCheckout,
+  verifyCheckoutPayment,
+} from "./commerce-service.js";
+import { HttpError, asHttpError } from "./http-error.js";
+import { getProducts } from "./product-store.js";
 import { lookupIndianPincode } from "./pincode.js";
-import { createShiprocketShipment } from "./shiprocket.js";
+import { createRateLimiter } from "./rate-limit.js";
+import { razorpayWebhookHandler } from "./razorpay-webhook.js";
 import {
   getStoreSettings,
   publicStoreSettings,
 } from "./store-settings.js";
 
 const PORT = Number(process.env.PORT || 8787);
-const app = express();
-const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+const currentFile = fileURLToPath(import.meta.url);
+const currentDirectory = path.dirname(currentFile);
 const projectRoot = path.resolve(currentDirectory, "..");
+export const app = express();
 
+if (process.env.TRUST_PROXY === "true") app.set("trust proxy", 1);
 app.disable("x-powered-by");
+
+app.use((request, response, next) => {
+  const requestId = crypto.randomUUID();
+  request.requestId = requestId;
+  response.header("X-Request-ID", requestId);
+  response.header("X-Content-Type-Options", "nosniff");
+  response.header("Referrer-Policy", "same-origin");
+  response.header("X-Frame-Options", "DENY");
+  response.header(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=()",
+  );
+  next();
+});
+
+app.post(
+  "/api/webhooks/razorpay",
+  express.raw({ type: "application/json", limit: "256kb" }),
+  razorpayWebhookHandler,
+);
+
 app.use(express.json({ limit: "100kb" }));
 app.use((request, response, next) => {
   if (request.path.startsWith("/api/")) {
     response.header("Cache-Control", "no-store, max-age=0");
   }
   const allowedOrigin = process.env.STORE_ORIGIN;
-  if (allowedOrigin && request.headers.origin === allowedOrigin) {
+  const requestOrigin = request.headers.origin;
+  if (allowedOrigin && requestOrigin === allowedOrigin) {
     response.header("Access-Control-Allow-Origin", allowedOrigin);
     response.header("Access-Control-Allow-Credentials", "true");
     response.header("Vary", "Origin");
-    response.header("Access-Control-Allow-Headers", "Content-Type");
+    response.header(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Idempotency-Key, If-Match, X-Order-Version",
+    );
     response.header(
       "Access-Control-Allow-Methods",
       "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     );
   }
   if (request.method === "OPTIONS") {
+    if (allowedOrigin && requestOrigin && requestOrigin !== allowedOrigin) {
+      response.sendStatus(403);
+      return;
+    }
     response.sendStatus(204);
+    return;
+  }
+  const stateChanging = ["POST", "PUT", "PATCH", "DELETE"].includes(
+    request.method,
+  );
+  if (
+    allowedOrigin &&
+    requestOrigin &&
+    requestOrigin !== allowedOrigin &&
+    stateChanging
+  ) {
+    response.status(403).json({
+      code: "ORIGIN_NOT_ALLOWED",
+      message: "This request did not come from the configured storefront.",
+    });
     return;
   }
   next();
 });
 
-const requireText = (value, field, minLength = 1) => {
+const pincodeRateLimit = createRateLimiter({
+  name: "pincode",
+  windowMs: 60 * 1000,
+  max: 60,
+});
+const checkoutRateLimit = createRateLimiter({
+  name: "checkout-ip",
+  windowMs: 10 * 60 * 1000,
+  max: 12,
+});
+const checkoutPhoneRateLimit = createRateLimiter({
+  name: "checkout-phone",
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (request) =>
+    String(request.body?.customer?.phone || request.ip || "unknown"),
+});
+const verifyRateLimit = createRateLimiter({
+  name: "payment-verify",
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+});
+const adminLoginRateLimit = createRateLimiter({
+  name: "admin-login",
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+});
+
+const requireText = (
+  value,
+  field,
+  { minimum = 1, maximum = 200 } = {},
+) => {
   const normalized = String(value || "").trim();
-  if (normalized.length < minLength) {
-    throw new Error(`A valid ${field} is required.`);
+  if (normalized.length < minimum) {
+    throw new HttpError(
+      400,
+      "INVALID_CUSTOMER_DETAILS",
+      `A valid ${field} is required.`,
+    );
+  }
+  const hasDisallowedControlCharacter = [...normalized].some((character) => {
+    const code = character.charCodeAt(0);
+    return (code < 32 && ![9, 10, 13].includes(code)) || code === 127;
+  });
+  if (
+    normalized.length > maximum ||
+    hasDisallowedControlCharacter
+  ) {
+    throw new HttpError(
+      400,
+      "INVALID_CUSTOMER_DETAILS",
+      `${field} contains invalid or excessive text.`,
+    );
   }
   return normalized;
 };
 
 const validateCustomer = (input = {}) => {
-  const phone = requireText(input.phone, "mobile number", 10);
-  const email = requireText(input.email, "email", 5);
-  const pincode = requireText(input.pincode, "PIN code", 6);
+  const phone = requireText(input.phone, "mobile number", {
+    minimum: 10,
+    maximum: 10,
+  });
+  const email = requireText(input.email, "email", {
+    minimum: 5,
+    maximum: 254,
+  }).toLowerCase();
+  const pincode = requireText(input.pincode, "PIN code", {
+    minimum: 6,
+    maximum: 6,
+  });
   if (!/^[6-9]\d{9}$/.test(phone)) {
-    throw new Error("Enter a valid 10-digit Indian mobile number.");
+    throw new HttpError(
+      400,
+      "INVALID_PHONE",
+      "Enter a valid 10-digit Indian mobile number.",
+    );
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new Error("Enter a valid email address.");
+    throw new HttpError(
+      400,
+      "INVALID_EMAIL",
+      "Enter a valid email address.",
+    );
   }
   if (!/^[1-9]\d{5}$/.test(pincode)) {
-    throw new Error("Enter a valid 6-digit Indian PIN code.");
+    throw new HttpError(
+      400,
+      "INVALID_PINCODE",
+      "Enter a valid 6-digit Indian PIN code.",
+    );
   }
 
   return {
-    name: requireText(input.name, "name", 2),
+    name: requireText(input.name, "name", {
+      minimum: 2,
+      maximum: 100,
+    }),
     phone,
     email,
-    address: requireText(input.address, "address", 3),
-    area: requireText(input.area, "area", 2),
-    city: requireText(input.city, "city", 2),
-    state: requireText(input.state, "state", 2),
+    address: requireText(input.address, "address", {
+      minimum: 3,
+      maximum: 180,
+    }),
+    area: requireText(input.area, "area", {
+      minimum: 2,
+      maximum: 120,
+    }),
+    city: requireText(input.city, "city", {
+      minimum: 2,
+      maximum: 80,
+    }),
+    state: requireText(input.state, "state", {
+      minimum: 2,
+      maximum: 80,
+    }),
     pincode,
   };
 };
 
-const priceOrder = async (requestedItems = []) => {
-  if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
-    throw new Error("Your cart is empty.");
+const sendRouteError = (
+  response,
+  error,
+  fallbackMessage,
+  context,
+) => {
+  const normalized = asHttpError(error, fallbackMessage);
+  if (normalized.status >= 500) {
+    console.error(context, {
+      requestId: response.getHeader("X-Request-ID"),
+      code: normalized.code,
+      cause: normalized.cause?.message,
+    });
   }
-
-  const products = await getProducts();
-  const items = requestedItems.map((requested) => {
-    const product = products.find((entry) => entry.id === requested.id);
-    const quantity = Number(requested.quantity);
-    if (!product || !Number.isInteger(quantity) || quantity < 1 || quantity > 10) {
-      throw new Error("One or more cart items are invalid.");
-    }
-    if (Number(product.inventory || 0) < quantity) {
-      throw new Error(`${product.name} does not have enough stock.`);
-    }
-    return {
-      id: product.id,
-      asin: product.asin,
-      name: product.name,
-      price: product.price,
-      quantity,
-    };
+  response.status(normalized.status).json({
+    code: normalized.code,
+    message: normalized.expose ? normalized.message : fallbackMessage,
   });
-
-  const subtotal = items.reduce(
-    (sum, item) => sum + item.price * item.quantity,
-    0,
-  );
-  const storeSettings = await getStoreSettings();
-  const shipping =
-    subtotal >= storeSettings.shipping.freeThreshold
-      ? 0
-      : storeSettings.shipping.standardFee;
-  return { items, subtotal, shipping, total: subtotal + shipping };
-};
-
-const createRazorpayOrder = async ({ orderId, total }) => {
-  const keyId = process.env.RAZORPAY_KEY_ID;
-  const keySecret = process.env.RAZORPAY_KEY_SECRET;
-  if (!keyId || !keySecret) {
-    throw new Error("Razorpay credentials are not configured.");
-  }
-
-  const response = await fetch("https://api.razorpay.com/v1/orders", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      amount: total * 100,
-      currency: "INR",
-      receipt: orderId,
-      notes: { storefront: "kelenate.in" },
-    }),
-  });
-
-  if (!response.ok) {
-    const detail = await response.text();
-    console.error("Razorpay order error:", response.status, detail);
-    throw new Error("The payment provider could not start this order.");
-  }
-  return response.json();
-};
-
-const internalOrderId = () => {
-  const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-  const suffix = crypto.randomBytes(3).toString("hex").toUpperCase();
-  return `KEL-${date}-${suffix}`;
 };
 
 app.get("/api/health", (_request, response) => {
@@ -157,9 +241,12 @@ app.get("/api/health", (_request, response) => {
     razorpay: Boolean(
       process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET,
     ),
+    razorpayWebhook: Boolean(process.env.RAZORPAY_WEBHOOK_SECRET),
+    onlinePayment: onlineCheckoutEnabled(),
     shiprocket: Boolean(
       process.env.SHIPROCKET_EMAIL && process.env.SHIPROCKET_PASSWORD,
     ),
+    cod: codCheckoutEnabled(),
   });
 });
 
@@ -171,176 +258,144 @@ app.get("/api/catalog", async (_request, response) => {
   response.json({
     products,
     settings: publicStoreSettings(storeSettings),
+    capabilities: {
+      onlinePayment: onlineCheckoutEnabled(),
+      cod: codCheckoutEnabled(),
+    },
   });
 });
 
-app.get("/api/pincode/:pincode", async (request, response) => {
-  try {
-    const result = await lookupIndianPincode(request.params.pincode);
-    if (!result) {
-      response.status(404).json({
-        valid: false,
-        message: "We could not find that PIN code. Check the six digits.",
+app.get(
+  "/api/pincode/:pincode",
+  pincodeRateLimit,
+  async (request, response) => {
+    try {
+      const result = await lookupIndianPincode(request.params.pincode);
+      if (!result) {
+        response.status(404).json({
+          valid: false,
+          code: "PINCODE_NOT_FOUND",
+          message: "We could not find that PIN code. Check the six digits.",
+        });
+        return;
+      }
+      response.json({ valid: true, ...result });
+    } catch (error) {
+      const status =
+        error.code === "INVALID_PINCODE"
+          ? 400
+          : error.code === "PINCODE_LOOKUP_UNAVAILABLE"
+            ? 503
+            : 500;
+      response.status(status).json({
+        valid: status >= 500 ? null : false,
+        code: error.code || "PINCODE_LOOKUP_FAILED",
+        message:
+          status >= 500
+            ? "PIN lookup is temporarily unavailable."
+            : error.message,
       });
-      return;
     }
-    response.json({ valid: true, ...result });
-  } catch (error) {
-    const status =
-      error.code === "INVALID_PINCODE"
-        ? 400
-        : error.code === "PINCODE_LOOKUP_UNAVAILABLE"
-          ? 503
-          : 500;
-    response.status(status).json({
-      valid: status >= 500 ? null : false,
-      message: error.message || "PIN lookup could not be completed.",
-    });
-  }
-});
+  },
+);
 
+app.use("/api/admin/login", adminLoginRateLimit);
 app.use("/api/admin", adminRouter);
 
-app.post("/api/checkout", async (request, response) => {
-  try {
-    const customer = validateCustomer(request.body.customer);
-    const paymentMethod =
-      request.body.paymentMethod === "cod" ? "cod" : "online";
+app.post(
+  "/api/checkout",
+  checkoutRateLimit,
+  checkoutPhoneRateLimit,
+  async (request, response) => {
     try {
-      const postalRecord = await lookupIndianPincode(customer.pincode);
-      if (!postalRecord) {
-        throw new Error(
-          "We could not find that PIN code in the postal directory.",
-        );
+      let customer = validateCustomer(request.body.customer);
+      const paymentMethod = String(request.body.paymentMethod || "");
+      try {
+        const postalRecord = await lookupIndianPincode(customer.pincode);
+        if (!postalRecord) {
+          throw new HttpError(
+            400,
+            "PINCODE_NOT_FOUND",
+            "We could not find that PIN code in the postal directory.",
+          );
+        }
+        customer = {
+          ...customer,
+          city: postalRecord.city || customer.city,
+          state: postalRecord.state || customer.state,
+        };
+        if (
+          paymentMethod === "cod" &&
+          Number(postalRecord.deliveryPostOffices || 0) === 0
+        ) {
+          throw new HttpError(
+            409,
+            "COD_PIN_UNAVAILABLE",
+            "COD could not be verified for this PIN code. Choose online payment or contact support.",
+          );
+        }
+      } catch (pincodeError) {
+        if (pincodeError.code !== "PINCODE_LOOKUP_UNAVAILABLE") {
+          throw pincodeError;
+        }
+        if (paymentMethod === "cod") {
+          throw new HttpError(
+            503,
+            "COD_PIN_LOOKUP_UNAVAILABLE",
+            "COD PIN verification is temporarily unavailable. Choose online payment or try again shortly.",
+            { expose: true },
+          );
+        }
+        // A postal-directory outage should not block a manually verified address.
       }
-      if (
-        paymentMethod === "cod" &&
-        Number(postalRecord.deliveryPostOffices || 0) === 0
-      ) {
-        throw new Error(
-          "COD could not be verified for this PIN code. Choose online payment or contact support.",
-        );
-      }
-    } catch (pincodeError) {
-      if (pincodeError.code !== "PINCODE_LOOKUP_UNAVAILABLE") {
-        throw pincodeError;
-      }
-      if (paymentMethod === "cod") {
-        throw new Error(
-          "COD PIN verification is temporarily unavailable. Choose online payment or try again shortly.",
-        );
-      }
-      // A postal-directory outage should not block a manual address.
-    }
-    const totals = await priceOrder(request.body.items);
-    const orderId = internalOrderId();
 
-    const order = await createOrderRecord({
-      orderId,
-      customer,
-      ...totals,
-      paymentMethod,
-      status: paymentMethod === "cod" ? "cod_confirmed" : "payment_pending",
-      createdAt: new Date().toISOString(),
-    });
-
-    if (paymentMethod === "cod") {
-      await decrementInventory(order.items);
-      const shipment = await createShiprocketShipment(order);
-      await updateOrderRecord(orderId, {
-        shipment,
-        status: shipment.created ? "shipment_created" : "shipment_pending",
+      const order = await startCheckout({
+        customer,
+        requestedItems: request.body.items,
+        paymentMethod,
+        idempotencyKey: request.get("Idempotency-Key"),
       });
-      response.json({
-        orderId,
-        status: shipment.created ? "confirmed" : "shipment_pending",
-        message: shipment.created
-          ? "Your cash-on-delivery order is confirmed."
-          : "Your order is confirmed and is waiting for courier allocation.",
+      response.status(201).json(order);
+    } catch (error) {
+      sendRouteError(
+        response,
+        error,
+        "Checkout could not be started.",
+        "Checkout failed",
+      );
+    }
+  },
+);
+
+app.post(
+  "/api/checkout/verify",
+  verifyRateLimit,
+  async (request, response) => {
+    try {
+      const result = await verifyCheckoutPayment({
+        orderId: String(request.body.orderId || ""),
+        razorpayPaymentId: String(
+          request.body.razorpay_payment_id || "",
+        ),
+        signature: String(request.body.razorpay_signature || ""),
       });
-      return;
-    }
-
-    const razorpayOrder = await createRazorpayOrder({
-      orderId,
-      total: totals.total,
-    });
-    await updateOrderRecord(orderId, {
-      razorpayOrderId: razorpayOrder.id,
-    });
-    response.json({
-      orderId,
-      razorpayOrderId: razorpayOrder.id,
-      razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-      amount: razorpayOrder.amount,
-    });
-  } catch (error) {
-    console.error("Checkout error:", error);
-    response.status(400).json({
-      message: error.message || "Checkout could not be started.",
-    });
-  }
-});
-
-app.post("/api/checkout/verify", async (request, response) => {
-  try {
-    const {
-      orderId,
-      razorpay_order_id: razorpayOrderId,
-      razorpay_payment_id: razorpayPaymentId,
-      razorpay_signature: razorpaySignature,
-    } = request.body;
-    const order = await findOrder(orderId);
-    if (!order || order.razorpayOrderId !== razorpayOrderId) {
-      throw new Error("This order could not be verified.");
-    }
-    if (order.razorpayPaymentId === razorpayPaymentId) {
-      response.json({
-        orderId,
-        status: "confirmed",
-        message: "Payment received and your order is confirmed.",
+      response.status(result.pending ? 202 : 200).json({
+        orderId: result.order.orderId,
+        status: result.pending
+          ? "payment_processing"
+          : result.order.status,
+        message: result.message,
       });
-      return;
+    } catch (error) {
+      sendRouteError(
+        response,
+        error,
+        "Payment could not be verified.",
+        "Payment verification failed",
+      );
     }
-
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest("hex");
-    const supplied = Buffer.from(String(razorpaySignature || ""));
-    const expected = Buffer.from(expectedSignature);
-    if (
-      supplied.length !== expected.length ||
-      !crypto.timingSafeEqual(supplied, expected)
-    ) {
-      throw new Error("Payment signature verification failed.");
-    }
-
-    await decrementInventory(order.items);
-    const paidOrder = await updateOrderRecord(orderId, {
-      razorpayPaymentId,
-      paidAt: new Date().toISOString(),
-      status: "paid",
-    });
-    const shipment = await createShiprocketShipment(paidOrder);
-    await updateOrderRecord(orderId, {
-      shipment,
-      status: shipment.created ? "shipment_created" : "shipment_pending",
-    });
-    response.json({
-      orderId,
-      status: shipment.created ? "confirmed" : "shipment_pending",
-      message: shipment.created
-        ? "Payment received and your order is confirmed."
-        : "Payment received. Your order is confirmed and awaiting courier allocation.",
-    });
-  } catch (error) {
-    console.error("Verification error:", error);
-    response.status(400).json({
-      message: error.message || "Payment could not be verified.",
-    });
-  }
-});
+  },
+);
 
 app.use("/uploads", express.static(path.join(projectRoot, "public", "uploads")));
 app.use(express.static(path.join(projectRoot, "dist")));
@@ -348,6 +403,11 @@ app.get("/{*splat}", (_request, response) => {
   response.sendFile(path.join(projectRoot, "dist", "index.html"));
 });
 
-app.listen(PORT, () => {
-  console.log(`Kelenate commerce server listening on http://localhost:${PORT}`);
-});
+export const startServer = (port = PORT) =>
+  app.listen(port, () => {
+    console.log(`Kelenate commerce server listening on http://localhost:${port}`);
+  });
+
+if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
+  startServer();
+}

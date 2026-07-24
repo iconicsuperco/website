@@ -1,4 +1,8 @@
-const SHIPROCKET_API = "https://apiv2.shiprocket.in/v1/external";
+const SHIPROCKET_API = String(
+  process.env.SHIPROCKET_API_URL ||
+    "https://apiv2.shiprocket.in/v1/external",
+).replace(/\/$/, "");
+const SHIPROCKET_TIMEOUT_MS = 6500;
 
 const credentialsAvailable = () =>
   Boolean(process.env.SHIPROCKET_EMAIL && process.env.SHIPROCKET_PASSWORD);
@@ -23,6 +27,7 @@ const authenticate = async () => {
       email: process.env.SHIPROCKET_EMAIL,
       password: process.env.SHIPROCKET_PASSWORD,
     }),
+    signal: AbortSignal.timeout(SHIPROCKET_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error("Shiprocket authentication failed.");
   const result = await response.json();
@@ -81,6 +86,7 @@ export const createShiprocketShipment = async (order) => {
         sub_total: order.subtotal,
         ...measurements,
       }),
+      signal: AbortSignal.timeout(SHIPROCKET_TIMEOUT_MS),
     });
     const result = await response.json();
     if (!response.ok) {

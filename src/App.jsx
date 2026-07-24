@@ -35,10 +35,11 @@ import {
 } from "lucide-react";
 import { CATEGORIES, COLLECTIONS, PRODUCTS } from "./data/products";
 import {
-  commerceConfigured,
+  commercePreview,
   submitCheckout,
 } from "./services/commerce";
 import {
+  DEFAULT_COMMERCE_CAPABILITIES,
   DEFAULT_STOREFRONT_SETTINGS,
   loadCatalog,
 } from "./services/catalog";
@@ -53,6 +54,15 @@ const formatCurrency = (value) =>
 
 const discountPercent = (product) =>
   Math.round(((product.mrp - product.price) / product.mrp) * 100);
+
+const paymentAvailabilityLabel = (capabilities) => {
+  const online = capabilities?.onlinePayment !== false;
+  const cod = capabilities?.cod !== false;
+  if (online && cod) return "UPI, cards & COD";
+  if (online) return "UPI, cards & net banking";
+  if (cod) return "Cash on delivery";
+  return "Payment setup in progress";
+};
 
 const phoneLink = (phone) => `tel:${String(phone).replace(/[^\d+]/g, "")}`;
 
@@ -334,6 +344,9 @@ function App() {
   const [storeSettings, setStoreSettings] = useState(
     DEFAULT_STOREFRONT_SETTINGS,
   );
+  const [commerceCapabilities, setCommerceCapabilities] = useState(
+    DEFAULT_COMMERCE_CAPABILITIES,
+  );
   const [pathname, setPathname] = useState(window.location.pathname);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All products");
@@ -378,9 +391,10 @@ function App() {
   useEffect(() => {
     let current = true;
     loadCatalog()
-      .then(({ products, settings }) => {
+      .then(({ products, settings, capabilities }) => {
         if (current && products.length) setCatalog(products);
         if (current) setStoreSettings(settings);
+        if (current) setCommerceCapabilities(capabilities);
       })
       .catch(() => {
         // The bundled catalog keeps the storefront available in preview mode.
@@ -806,6 +820,7 @@ function App() {
             product={activeProduct}
             catalog={catalog}
             settings={storeSettings}
+            capabilities={commerceCapabilities}
             onHome={() => openHome()}
             onCategory={shopCategory}
             onAdd={addToCart}
@@ -834,7 +849,10 @@ function App() {
               if (product) openProduct(product);
             }}
           />
-          <TrustStrip settings={storeSettings} />
+          <TrustStrip
+            settings={storeSettings}
+            capabilities={commerceCapabilities}
+          />
           <BrandPromise catalog={catalog} />
           <Collections onCategory={shopCategory} />
           <FeatureShowcase catalog={catalog} onProduct={openProduct} />
@@ -867,7 +885,10 @@ function App() {
           )}
           <MarketplaceProof catalog={catalog} onQuickView={setQuickView} />
           <BrandStory />
-          <Faq settings={storeSettings} />
+          <Faq
+            settings={storeSettings}
+            capabilities={commerceCapabilities}
+          />
           <SupportBand settings={storeSettings} />
         </main>
       )}
@@ -876,6 +897,7 @@ function App() {
         onCategory={shopCategory}
         categories={categories}
         settings={storeSettings}
+        capabilities={commerceCapabilities}
       />
 
       <CartDrawer
@@ -895,6 +917,7 @@ function App() {
         recommendation={cartRecommendation}
         onAdd={addToCart}
         onProduct={openProduct}
+        capabilities={commerceCapabilities}
       />
 
       {searchOpen && (
@@ -944,6 +967,7 @@ function App() {
           shipping={shipping}
           total={total}
           settings={storeSettings}
+          capabilities={commerceCapabilities}
           onUpdate={updateQuantity}
           onClose={() => setCheckoutOpen(false)}
           onComplete={() => setCart({})}
@@ -1595,7 +1619,7 @@ function Hero({ onShop, onCategory, settings, catalogCount, onProduct }) {
   );
 }
 
-function TrustStrip({ settings }) {
+function TrustStrip({ settings, capabilities }) {
   const benefits = [
     [
       Truck,
@@ -1603,7 +1627,11 @@ function TrustStrip({ settings }) {
       `On ${formatCurrency(settings.shipping.freeThreshold)} or more`,
     ],
     [PackageCheck, "Careful packing", "Protected in transit"],
-    [CreditCard, "Secure checkout", "UPI, cards & COD"],
+    [
+      CreditCard,
+      "Secure checkout",
+      paymentAvailabilityLabel(capabilities),
+    ],
     [Headphones, "Real support", settings.support.hours],
   ];
   return (
@@ -2144,6 +2172,7 @@ function ProductPage({
   product,
   catalog,
   settings,
+  capabilities,
   onHome,
   onCategory,
   onAdd,
@@ -2162,6 +2191,8 @@ function ProductPage({
   const inventory = Number(product.inventory ?? 1);
   const soldOut = inventory <= 0;
   const lowStock = inventory > 0 && inventory <= 8;
+  const paymentAvailable =
+    capabilities?.onlinePayment !== false || capabilities?.cod !== false;
   const related = [
     ...catalog.filter(
       (item) => item.id !== product.id && item.category === product.category,
@@ -2396,9 +2427,9 @@ function ProductPage({
               className="button pdp-buy-now"
               type="button"
               onClick={() => onBuyNow(product, quantity)}
-              disabled={soldOut}
+              disabled={soldOut || !paymentAvailable}
             >
-              Buy now
+              {paymentAvailable ? "Buy now" : "Checkout unavailable"}
               <ArrowRight size={18} />
             </button>
           </div>
@@ -2407,12 +2438,23 @@ function ProductPage({
             <div>
               <ShieldCheck size={19} />
               <span>
-                <strong>Razorpay-secured payments</strong>
-                <small className="pdp-payment-marks" aria-label="Payment methods">
-                  <b>UPI</b>
-                  <b>RuPay</b>
-                  <b>Visa</b>
-                </small>
+                <strong>
+                  {capabilities?.onlinePayment !== false
+                    ? "Razorpay-secured payments"
+                    : capabilities?.cod !== false
+                      ? "Cash on delivery available"
+                      : "Payment setup in progress"}
+                </strong>
+                {capabilities?.onlinePayment !== false && (
+                  <small
+                    className="pdp-payment-marks"
+                    aria-label="Payment methods"
+                  >
+                    <b>UPI</b>
+                    <b>RuPay</b>
+                    <b>Visa</b>
+                  </small>
+                )}
               </span>
             </div>
             <div>
@@ -2496,7 +2538,7 @@ function ProductPage({
           <CreditCard size={21} />
           <span>
             <strong>Flexible payment</strong>
-            Online or cash on delivery
+            {paymentAvailabilityLabel(capabilities)}
           </span>
         </div>
         <div>
@@ -2912,12 +2954,15 @@ function CartDrawer({
   recommendation,
   onAdd,
   onProduct,
+  capabilities,
 }) {
   if (!open) return null;
   const threshold = Number(shippingSettings.freeThreshold);
   const remaining = Math.max(0, threshold - subtotal);
   const progress =
     threshold === 0 ? 100 : Math.min(100, (subtotal / threshold) * 100);
+  const paymentAvailable =
+    capabilities?.onlinePayment !== false || capabilities?.cod !== false;
 
   return (
     <div className="drawer-wrap">
@@ -3030,14 +3075,22 @@ function CartDrawer({
                 className="button button-primary checkout-button"
                 type="button"
                 onClick={onCheckout}
+                disabled={!paymentAvailable}
               >
-                Secure checkout <ArrowRight size={18} />
+                {paymentAvailable ? "Secure checkout" : "Checkout unavailable"}
+                <ArrowRight size={18} />
               </button>
               <div className="payment-row">
-                <span>UPI</span>
-                <span>RuPay</span>
-                <span>Visa</span>
-                <span>COD</span>
+                {capabilities?.onlinePayment !== false && (
+                  <>
+                    <span>UPI</span>
+                    <span>RuPay</span>
+                    <span>Visa</span>
+                  </>
+                )}
+                {capabilities?.cod !== false && <span>COD</span>}
+                {capabilities?.onlinePayment === false &&
+                  capabilities?.cod === false && <span>Setup pending</span>}
               </div>
             </div>
           </>
@@ -3138,11 +3191,16 @@ function Checkout({
   shipping,
   total,
   settings,
+  capabilities,
   onUpdate,
   onClose,
   onComplete,
 }) {
-  const [paymentMethod, setPaymentMethod] = useState("online");
+  const onlinePaymentAvailable = capabilities?.onlinePayment !== false;
+  const codAvailable = capabilities?.cod !== false;
+  const [paymentMethod, setPaymentMethod] = useState(() =>
+    onlinePaymentAvailable ? "online" : codAvailable ? "cod" : "",
+  );
   const [customer, setCustomer] = useState(storedCheckoutDetails);
   const [touched, setTouched] = useState({});
   const [fieldErrors, setFieldErrors] = useState({});
@@ -3153,6 +3211,17 @@ function Checkout({
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const dialogRef = useRef(null);
+
+  useEffect(() => {
+    if (paymentMethod === "online" && !onlinePaymentAvailable) {
+      setPaymentMethod(codAvailable ? "cod" : "");
+    } else if (paymentMethod === "cod" && !codAvailable) {
+      setPaymentMethod(onlinePaymentAvailable ? "online" : "");
+    } else if (!paymentMethod) {
+      if (onlinePaymentAvailable) setPaymentMethod("online");
+      else if (codAvailable) setPaymentMethod("cod");
+    }
+  }, [codAvailable, onlinePaymentAvailable, paymentMethod]);
 
   useEffect(() => {
     const hasDraft = CHECKOUT_FIELD_NAMES.some((field) => customer[field]);
@@ -3358,6 +3427,14 @@ function Checkout({
       setError("Please wait a moment while we validate your PIN code.");
       return;
     }
+    if (
+      !paymentMethod ||
+      (paymentMethod === "online" && !onlinePaymentAvailable) ||
+      (paymentMethod === "cod" && !codAvailable)
+    ) {
+      setError("Choose an available payment method to continue.");
+      return;
+    }
 
     setBusy(true);
     try {
@@ -3379,9 +3456,11 @@ function Checkout({
         totals: { subtotal, shipping, total },
         paymentMethod,
       });
-      sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
       setResult(order);
-      onComplete();
+      if (order.terminal !== false && !order.pending) {
+        sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
+        onComplete();
+      }
     } catch (checkoutError) {
       setError(checkoutError.message || "Checkout could not be completed.");
     } finally {
@@ -3405,6 +3484,9 @@ function Checkout({
       : pincodeStatus === "unavailable"
         ? "warning"
         : "info";
+  const resultPending =
+    result?.pending || result?.status === "payment_processing";
+  const paymentOptionsAvailable = onlinePaymentAvailable || codAvailable;
 
   return (
     <div className="modal-wrap">
@@ -3437,17 +3519,41 @@ function Checkout({
         {result ? (
           <div className="order-result">
             <div className="result-check">
-              <Check size={32} />
+              {resultPending ? <Clock3 size={32} /> : <Check size={32} />}
             </div>
             <p className="eyebrow">
-              {result.preview ? "Checkout preview complete" : "Order confirmed"}
+              {result.preview
+                ? "Checkout preview complete"
+                : resultPending
+                  ? "Payment confirmation pending"
+                  : "Order confirmed"}
             </p>
-            <h2>{result.preview ? "The order flow works." : "Thank you!"}</h2>
-            <p>{result.message || "Your order has been received."}</p>
+            <h2>
+              {result.preview
+                ? "The order flow works."
+                : resultPending
+                  ? "We’re confirming your payment."
+                  : "Thank you!"}
+            </h2>
+            <p>
+              {result.message ||
+                (resultPending
+                  ? "Razorpay is still confirming this payment."
+                  : "Your order has been received.")}
+            </p>
             <div className="order-number">
               <span>Order reference</span>
               <strong>{result.orderId}</strong>
             </div>
+            {resultPending && (
+              <div className="preview-explainer">
+                <Clock3 size={18} />
+                <span>
+                  Keep this reference and do not place the order again while
+                  confirmation is pending.
+                </span>
+              </div>
+            )}
             {result.preview && (
               <div className="preview-explainer">
                 <Zap size={18} />
@@ -3477,7 +3583,7 @@ function Checkout({
                 <div className="checkout-title">
                   <p className="eyebrow">Secure checkout</p>
                   <h2 id="checkout-title">Where should we send it?</h2>
-                  {!commerceConfigured && (
+                  {commercePreview && (
                     <span className="preview-pill">
                       <Zap size={14} /> Preview mode
                     </span>
@@ -3582,7 +3688,17 @@ function Checkout({
                   <h3>Payment</h3>
                   <div className="payment-options">
                     <label
-                      className={paymentMethod === "online" ? "selected" : ""}
+                      className={
+                        paymentMethod === "online" && onlinePaymentAvailable
+                          ? "selected"
+                          : ""
+                      }
+                      aria-disabled={!onlinePaymentAvailable}
+                      style={
+                        onlinePaymentAvailable
+                          ? undefined
+                          : { cursor: "not-allowed", opacity: 0.62 }
+                      }
                     >
                       <input
                         type="radio"
@@ -3590,6 +3706,7 @@ function Checkout({
                         value="online"
                         checked={paymentMethod === "online"}
                         onChange={() => setPaymentMethod("online")}
+                        disabled={!onlinePaymentAvailable}
                       />
                       <span className="payment-icon">
                         <CreditCard size={20} />
@@ -3597,20 +3714,42 @@ function Checkout({
                       <span className="payment-option-copy">
                         <span className="payment-option-heading">
                           <strong>Pay online</strong>
-                          <em>Instant confirmation</em>
+                          <em>
+                            {onlinePaymentAvailable
+                              ? "Instant confirmation"
+                              : "Unavailable"}
+                          </em>
                         </span>
                         <small>
-                          UPI, cards and net banking · secured by Razorpay
+                          {onlinePaymentAvailable
+                            ? "UPI, cards and net banking · secured by Razorpay"
+                            : "Online payment is temporarily unavailable"}
                         </small>
                         <span className="payment-benefits">
-                          <b>₹0 payment fee</b>
-                          <b>Same delivery charge</b>
+                          {onlinePaymentAvailable ? (
+                            <>
+                              <b>₹0 payment fee</b>
+                              <b>Same delivery charge</b>
+                            </>
+                          ) : (
+                            <b>Please try again later</b>
+                          )}
                         </span>
                       </span>
                       <i>{paymentMethod === "online" && <Check size={15} />}</i>
                     </label>
                     <label
-                      className={paymentMethod === "cod" ? "selected" : ""}
+                      className={
+                        paymentMethod === "cod" && codAvailable
+                          ? "selected"
+                          : ""
+                      }
+                      aria-disabled={!codAvailable}
+                      style={
+                        codAvailable
+                          ? undefined
+                          : { cursor: "not-allowed", opacity: 0.62 }
+                      }
                     >
                       <input
                         type="radio"
@@ -3618,6 +3757,7 @@ function Checkout({
                         value="cod"
                         checked={paymentMethod === "cod"}
                         onChange={() => setPaymentMethod("cod")}
+                        disabled={!codAvailable}
                       />
                       <span className="payment-icon">
                         <Banknote size={20} />
@@ -3625,12 +3765,24 @@ function Checkout({
                       <span className="payment-option-copy">
                         <span className="payment-option-heading">
                           <strong>Cash on delivery</strong>
-                          <em>Pay at your door</em>
+                          <em>
+                            {codAvailable ? "Pay at your door" : "Unavailable"}
+                          </em>
                         </span>
-                        <small>Pay the courier when your parcel arrives</small>
+                        <small>
+                          {codAvailable
+                            ? "Pay the courier when your parcel arrives"
+                            : "COD is temporarily unavailable for new orders"}
+                        </small>
                         <span className="payment-benefits">
-                          <b>₹0 COD fee</b>
-                          <b>Courier confirmation required</b>
+                          {codAvailable ? (
+                            <>
+                              <b>₹0 COD fee</b>
+                              <b>Courier confirmation required</b>
+                            </>
+                          ) : (
+                            <b>Choose online payment</b>
+                          )}
                         </span>
                       </span>
                       <i>{paymentMethod === "cod" && <Check size={15} />}</i>
@@ -3643,22 +3795,28 @@ function Checkout({
                     <CheckCircle2 size={18} />
                     <p>
                       <strong>
-                        {paymentMethod === "online"
-                          ? "Choose online for immediate payment confirmation."
-                          : "Choose COD if you prefer paying after the parcel arrives."}
+                        {!paymentOptionsAvailable
+                          ? "Checkout is temporarily unavailable."
+                          : paymentMethod === "online"
+                            ? "Choose online for immediate payment confirmation."
+                            : "Choose COD if you prefer paying after the parcel arrives."}
                       </strong>{" "}
-                      {paymentMethod === "online"
-                        ? "There is currently no additional payment fee."
-                        : "Final COD availability depends on courier serviceability for your PIN code and is confirmed during order processing."}
+                      {!paymentOptionsAvailable
+                        ? "Please try again later or contact support."
+                        : paymentMethod === "online"
+                          ? "There is currently no additional payment fee."
+                          : "Final COD availability depends on courier serviceability for your PIN code and is confirmed during order processing."}
                     </p>
                   </div>
                   <div className="checkout-payment-reassurance">
                     <ShieldCheck size={18} />
                     <p>
                       <strong>
-                        {paymentMethod === "online"
-                          ? "Online payment is processed securely by Razorpay."
-                          : "No online payment is collected for a COD order."}
+                        {!paymentOptionsAvailable
+                          ? "No payment method is currently enabled."
+                          : paymentMethod === "online"
+                            ? "Online payment is processed securely by Razorpay."
+                            : "No online payment is collected for a COD order."}
                       </strong>
                       Eligible returns or replacements can be requested within{" "}
                       {settings.returns.windowDays} days. Approved refunds
@@ -3674,15 +3832,19 @@ function Checkout({
                 <button
                   className="button button-primary place-order"
                   type="submit"
-                  disabled={busy || pincodeStatus === "checking"}
+                  disabled={
+                    busy || pincodeStatus === "checking" || !paymentMethod
+                  }
                 >
                   {busy
                     ? "Starting secure checkout…"
                     : pincodeStatus === "checking"
                       ? "Checking PIN code…"
-                      : commerceConfigured
-                        ? `Place order · ${formatCurrency(total)}`
-                        : `Preview order · ${formatCurrency(total)}`}
+                      : !paymentMethod
+                        ? "Checkout temporarily unavailable"
+                        : commercePreview
+                          ? `Preview order · ${formatCurrency(total)}`
+                          : `Place order · ${formatCurrency(total)}`}
                   {!busy && pincodeStatus !== "checking" && (
                     <LockKeyhole size={17} />
                   )}
@@ -3751,9 +3913,11 @@ function Checkout({
                   <ShieldCheck size={19} />
                   <span>
                     <strong>Secure transaction</strong>
-                    {paymentMethod === "online"
-                      ? "Payment details are handled by Razorpay."
-                      : "Payment is collected by the courier at delivery."}
+                    {!paymentMethod
+                      ? "Payment options are temporarily unavailable."
+                      : paymentMethod === "online"
+                        ? "Payment details are handled by Razorpay."
+                        : "Payment is collected by the courier at delivery."}
                   </span>
                 </div>
               </aside>
@@ -3902,7 +4066,7 @@ function MarketplaceProof({ catalog, onQuickView }) {
   );
 }
 
-function Faq({ settings }) {
+function Faq({ settings, capabilities }) {
   const questions = [
     [
       "When is shipping free?",
@@ -3914,7 +4078,11 @@ function Faq({ settings }) {
     ],
     [
       "Can I pay cash on delivery?",
-      "You can request COD at checkout. Final availability depends on courier serviceability for your PIN code and is confirmed during order processing. Online payments through UPI, cards, wallets and net banking are processed securely by Razorpay.",
+      capabilities?.cod !== false
+        ? "You can request COD at checkout. Final availability depends on courier serviceability for your PIN code and is confirmed during order processing."
+        : capabilities?.onlinePayment !== false
+          ? "COD is not currently enabled. You can pay online through UPI, cards and net banking, processed securely by Razorpay."
+          : "Checkout payment methods are temporarily unavailable. Contact support before placing an order.",
     ],
     [
       "Will a car accessory fit my vehicle?",
@@ -4015,7 +4183,13 @@ function SupportBand({ settings }) {
   );
 }
 
-function Footer({ onPolicy, onCategory, categories, settings }) {
+function Footer({
+  onPolicy,
+  onCategory,
+  categories,
+  settings,
+  capabilities,
+}) {
   return (
     <footer className="footer">
       <div className="container footer-grid">
@@ -4072,10 +4246,16 @@ function Footer({ onPolicy, onCategory, categories, settings }) {
       <div className="container footer-bottom">
         <span>© 2026 Kelenate · M/s North West</span>
         <div>
-          <span>UPI</span>
-          <span>RuPay</span>
-          <span>Visa</span>
-          <span>COD</span>
+          {capabilities?.onlinePayment !== false && (
+            <>
+              <span>UPI</span>
+              <span>RuPay</span>
+              <span>Visa</span>
+            </>
+          )}
+          {capabilities?.cod !== false && <span>COD</span>}
+          {capabilities?.onlinePayment === false &&
+            capabilities?.cod === false && <span>Payment setup pending</span>}
         </div>
       </div>
     </footer>

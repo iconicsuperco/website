@@ -11,11 +11,24 @@ import {
   logoutAdmin,
   requireAdmin,
 } from "./admin-auth.js";
-import { getOrders, updateOrderRecord } from "./order-store.js";
+import { asHttpError, HttpError } from "./http-error.js";
+import { withKeyedLock } from "./keyed-lock.js";
+import {
+  evolveOrder,
+  ORDER_STATUSES,
+  orderWithAdminTransitions,
+  transitionOrderForAdmin,
+} from "./order-lifecycle.js";
+import {
+  findOrder,
+  getOrders,
+  mutateOrderRecord,
+} from "./order-store.js";
 import {
   archiveProduct,
   createProduct,
   getProducts,
+  restoreInventory,
   updateProduct,
 } from "./product-store.js";
 import {
@@ -52,20 +65,48 @@ const upload = multer({
   },
 });
 
-const allowedOrderStatuses = new Set([
-  "payment_pending",
-  "paid",
-  "cod_confirmed",
-  "shipment_pending",
-  "shipment_created",
-  "processing",
-  "shipped",
-  "delivered",
-  "cancelled",
-  "refunded",
-]);
+const allowedOrderStatuses = new Set(ORDER_STATUSES);
 
 const router = express.Router();
+
+const orderVersionFromRequest = (request) => {
+  const rawVersion = request.body?.version ?? request.get("If-Match");
+  const normalized = String(rawVersion ?? "")
+    .replace(/^W\//, "")
+    .replace(/^"|"$/g, "");
+  const version = Number(normalized);
+  if (!Number.isInteger(version) || version < 1) {
+    throw new HttpError(
+      428,
+      "ORDER_VERSION_REQUIRED",
+      "Refresh this order before changing its status.",
+    );
+  }
+  return version;
+};
+
+const capturedRevenue = (order) => {
+  if (order.paymentStatus !== "paid") return 0;
+  const total = Number(order.total || 0);
+  const processedRefund = Number(order.refundedAmount || 0) / 100;
+  if (order.refundStatus === "processed" && processedRefund === 0) return 0;
+  return Math.max(0, total - processedRefund);
+};
+
+const orderNeedsAction = (order) => {
+  if (order.inventoryStatus === "attention") return true;
+  if (order.refundStatus === "failed") return true;
+  if (
+    ["cancelled", "shipped", "delivered"].includes(order.fulfillmentStatus) ||
+    order.refundStatus === "processed"
+  ) {
+    return false;
+  }
+  return (
+    ["paid", "cod_due"].includes(order.paymentStatus) &&
+    ["unfulfilled", "packed"].includes(order.fulfillmentStatus)
+  );
+};
 
 const adminSettingsPayload = async (savedSettings) => {
   const [products, storeSettings] = await Promise.all([
@@ -86,6 +127,7 @@ const adminSettingsPayload = async (savedSettings) => {
       razorpay: Boolean(
         process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET,
       ),
+      razorpayWebhook: Boolean(process.env.RAZORPAY_WEBHOOK_SECRET),
       shiprocket: Boolean(
         process.env.SHIPROCKET_EMAIL && process.env.SHIPROCKET_PASSWORD,
       ),
@@ -104,29 +146,14 @@ router.get("/dashboard", async (_request, response) => {
     getOrders(),
     getProducts({ includeInactive: true }),
   ]);
-  const revenueStatuses = new Set([
-    "paid",
-    "shipment_pending",
-    "shipment_created",
-    "processing",
-    "shipped",
-    "delivered",
-  ]);
-  const pendingStatuses = new Set([
-    "paid",
-    "cod_confirmed",
-    "shipment_pending",
-    "shipment_created",
-    "processing",
-  ]);
   response.json({
     metrics: {
       totalOrders: orders.length,
-      revenue: orders
-        .filter((order) => revenueStatuses.has(order.status))
-        .reduce((sum, order) => sum + Number(order.total || 0), 0),
-      pendingOrders: orders.filter((order) => pendingStatuses.has(order.status))
-        .length,
+      revenue: orders.reduce(
+        (sum, order) => sum + capturedRevenue(order),
+        0,
+      ),
+      pendingOrders: orders.filter(orderNeedsAction).length,
       activeProducts: products.filter((product) => product.active !== false)
         .length,
       lowStock: products.filter(
@@ -134,7 +161,7 @@ router.get("/dashboard", async (_request, response) => {
           product.active !== false && Number(product.inventory || 0) <= 5,
       ).length,
     },
-    recentOrders: orders.slice(0, 6),
+    recentOrders: orders.slice(0, 6).map(orderWithAdminTransitions),
     lowStockProducts: products
       .filter(
         (product) =>
@@ -145,6 +172,7 @@ router.get("/dashboard", async (_request, response) => {
       razorpay: Boolean(
         process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET,
       ),
+      razorpayWebhook: Boolean(process.env.RAZORPAY_WEBHOOK_SECRET),
       shiprocket: Boolean(
         process.env.SHIPROCKET_EMAIL && process.env.SHIPROCKET_PASSWORD,
       ),
@@ -159,22 +187,88 @@ router.get("/dashboard", async (_request, response) => {
 });
 
 router.get("/orders", async (_request, response) => {
-  response.json({ orders: await getOrders() });
+  const orders = await getOrders();
+  response.json({ orders: orders.map(orderWithAdminTransitions) });
 });
 
 router.patch("/orders/:orderId", async (request, response) => {
   try {
-    const status = String(request.body.status || "");
+    const status = String(request.body?.status || "");
     if (!allowedOrderStatuses.has(status)) {
-      throw new Error("Choose a valid order status.");
+      throw new HttpError(
+        400,
+        "INVALID_ORDER_STATUS",
+        "Choose a valid order status.",
+      );
     }
-    const order = await updateOrderRecord(request.params.orderId, {
-      status,
-      statusUpdatedAt: new Date().toISOString(),
+    const expectedVersion = orderVersionFromRequest(request);
+    const order = await withKeyedLock(
+      `order:${request.params.orderId}`,
+      async () => {
+        if (status !== "cancelled") {
+          return mutateOrderRecord(request.params.orderId, (current) =>
+            transitionOrderForAdmin(current, status, expectedVersion),
+          );
+        }
+
+        const current = await findOrder(request.params.orderId);
+        if (!current) {
+          throw new HttpError(
+            404,
+            "ORDER_NOT_FOUND",
+            "Order record not found.",
+          );
+        }
+        transitionOrderForAdmin(current, status, expectedVersion);
+        const shouldReleaseInventory =
+          current.inventoryStatus === "committed" &&
+          !["shipped", "delivered"].includes(current.fulfillmentStatus);
+        if (shouldReleaseInventory) {
+          await restoreInventory(current.items, {
+            transactionId: current.orderId,
+          });
+        }
+
+        return mutateOrderRecord(request.params.orderId, (latest) => {
+          let updated = transitionOrderForAdmin(
+            latest,
+            status,
+            expectedVersion,
+          );
+          if (shouldReleaseInventory) {
+            updated = evolveOrder(
+              updated,
+              {
+                inventoryStatus: "released",
+                inventoryReleasedAt: new Date().toISOString(),
+              },
+              {
+                event: "inventory.released",
+                source: "admin",
+              },
+            );
+          }
+          return updated;
+        });
+      },
+    );
+    response.json({
+      order: orderWithAdminTransitions(order),
     });
-    response.json({ order });
   } catch (error) {
-    response.status(400).json({ message: error.message });
+    const httpError = asHttpError(error, "The order could not be updated.");
+    if (httpError.status >= 500) {
+      console.error("Admin order update failed", {
+        orderId: request.params.orderId,
+        code: httpError.code,
+      });
+    }
+    response.status(httpError.status).json({
+      code: httpError.code,
+      message: httpError.expose
+        ? httpError.message
+        : "The order could not be updated.",
+    });
   }
 });
 
