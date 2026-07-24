@@ -1,0 +1,16 @@
+{
+  "shipping": {
+    "freeThreshold": 500,
+    "standardFee": 49
+  },
+  "support": {
+    "phone": "+91 98991 07642",
+    "whatsapp": "919899107642",
+    "email": "sales@kelenate.in",
+    "hours": "Mon–Sat · 10am–5pm"
+  },
+  "returns": {
+    "windowDays": 7
+  },
+  "updatedAt": "2026-07-23T10:58:20.943Z"
+}
