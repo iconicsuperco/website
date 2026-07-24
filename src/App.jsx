@@ -42,6 +42,7 @@ import {
   DEFAULT_STOREFRONT_SETTINGS,
   loadCatalog,
 } from "./services/catalog";
+import { lookupPincode } from "./services/pincode";
 
 const formatCurrency = (value) =>
   new Intl.NumberFormat("en-IN", {
@@ -64,6 +65,87 @@ const storedIds = (key) => {
   } catch {
     return [];
   }
+};
+
+const storedCart = () => {
+  try {
+    const value = JSON.parse(localStorage.getItem("kelenate-cart"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value)
+        .map(([id, quantity]) => [
+          id,
+          Math.min(10, Math.max(0, Math.floor(Number(quantity) || 0))),
+        ])
+        .filter(([, quantity]) => quantity > 0),
+    );
+  } catch {
+    return {};
+  }
+};
+
+const CHECKOUT_DRAFT_KEY = "kelenate-checkout-draft";
+const CHECKOUT_FIELD_NAMES = [
+  "name",
+  "phone",
+  "email",
+  "address",
+  "area",
+  "city",
+  "state",
+  "pincode",
+];
+const EMPTY_CHECKOUT_DETAILS = {
+  name: "",
+  phone: "",
+  email: "",
+  address: "",
+  area: "",
+  city: "",
+  state: "",
+  pincode: "",
+};
+
+const storedCheckoutDetails = () => {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(CHECKOUT_DRAFT_KEY));
+    return CHECKOUT_FIELD_NAMES.reduce(
+      (details, field) => ({
+        ...details,
+        [field]: typeof value?.[field] === "string" ? value[field] : "",
+      }),
+      {},
+    );
+  } catch {
+    return { ...EMPTY_CHECKOUT_DETAILS };
+  }
+};
+
+const checkoutFieldError = (field, value) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "This field is required.";
+  if (field === "name" && normalized.length < 2) {
+    return "Enter the customer’s full name.";
+  }
+  if (field === "phone" && !/^[6-9]\d{9}$/.test(normalized)) {
+    return "Enter a valid 10-digit Indian mobile number.";
+  }
+  if (
+    field === "email" &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+  ) {
+    return "Enter a valid email address.";
+  }
+  if (field === "address" && normalized.length < 3) {
+    return "Add a little more detail.";
+  }
+  if (["area", "city", "state"].includes(field) && normalized.length < 2) {
+    return "Add a little more detail.";
+  }
+  if (field === "pincode" && !/^[1-9]\d{5}$/.test(normalized)) {
+    return "Enter a valid 6-digit Indian PIN code.";
+  }
+  return "";
 };
 
 const productIdFromPath = (pathname) => {
@@ -257,13 +339,7 @@ function App() {
   const [category, setCategory] = useState("All products");
   const [sort, setSort] = useState("featured");
   const [visibleCount, setVisibleCount] = useState(8);
-  const [cart, setCart] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("kelenate-cart")) || {};
-    } catch {
-      return {};
-    }
-  });
+  const [cart, setCart] = useState(storedCart);
   const [cartOpen, setCartOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [wishlistOpen, setWishlistOpen] = useState(false);
@@ -316,6 +392,35 @@ function App() {
       current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!catalogLoaded) return;
+    setCart((current) => {
+      const next = {};
+      let changed = false;
+
+      Object.entries(current).forEach(([id, requestedQuantity]) => {
+        const product = catalog.find((item) => item.id === id);
+        if (!product) {
+          changed = true;
+          return;
+        }
+
+        const maximum = Math.min(
+          10,
+          Math.max(0, Number(product.inventory ?? 10)),
+        );
+        const quantity = Math.min(
+          maximum,
+          Math.max(0, Math.floor(Number(requestedQuantity) || 0)),
+        );
+        if (quantity > 0) next[id] = quantity;
+        if (quantity !== requestedQuantity) changed = true;
+      });
+
+      return changed ? next : current;
+    });
+  }, [catalog, catalogLoaded]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -579,17 +684,39 @@ function App() {
   };
 
   const addToCart = (product, quantity = 1) => {
+    const maximum = Math.min(10, Math.max(0, Number(product.inventory ?? 10)));
+    if (maximum === 0) {
+      showToast(`${product.name} is currently unavailable`);
+      return;
+    }
     setCart((current) => ({
       ...current,
-      [product.id]: (current[product.id] || 0) + quantity,
+      [product.id]: Math.min(
+        maximum,
+        Number(current[product.id] || 0) +
+          Math.max(1, Math.floor(Number(quantity) || 1)),
+      ),
     }));
-    showToast(`${product.name} added to cart`);
+    showToast(
+      Number(cart[product.id] || 0) >= maximum
+        ? `${product.name} is already at the cart limit`
+        : `${product.name} added to cart`,
+    );
   };
 
   const buyNow = (product, quantity = 1) => {
+    const maximum = Math.min(10, Math.max(0, Number(product.inventory ?? 10)));
+    if (maximum === 0) {
+      showToast(`${product.name} is currently unavailable`);
+      return;
+    }
     setCart((current) => ({
       ...current,
-      [product.id]: (current[product.id] || 0) + quantity,
+      [product.id]: Math.min(
+        maximum,
+        Number(current[product.id] || 0) +
+          Math.max(1, Math.floor(Number(quantity) || 1)),
+      ),
     }));
     setToast("");
     setCartOpen(false);
@@ -600,7 +727,20 @@ function App() {
     setCart((current) => {
       const next = { ...current };
       if (quantity <= 0) delete next[productId];
-      else next[productId] = quantity;
+      else {
+        const product = catalog.find((item) => item.id === productId);
+        const maximum = Math.min(
+          10,
+          Math.max(0, Number(product?.inventory ?? 10)),
+        );
+        if (maximum === 0) delete next[productId];
+        else {
+          next[productId] = Math.min(
+            maximum,
+            Math.max(1, Math.floor(Number(quantity) || 1)),
+          );
+        }
+      }
       return next;
     });
   };
@@ -803,6 +943,7 @@ function App() {
           shipping={shipping}
           total={total}
           settings={storeSettings}
+          onUpdate={updateQuantity}
           onClose={() => setCheckoutOpen(false)}
           onComplete={() => setCart({})}
         />
@@ -2212,7 +2353,7 @@ function ProductPage({
                 className={deliveryState ? `is-${deliveryState}` : ""}
               >
                 {deliveryState === "ready" &&
-                  "Estimated in 3–7 business days. Exact serviceability is confirmed at checkout."}
+                  "Estimated in 3–7 business days. Final courier serviceability is confirmed during order processing."}
                 {deliveryState === "invalid" &&
                   "Please enter a valid 6-digit Indian PIN code."}
                 {!deliveryState &&
@@ -2833,7 +2974,10 @@ function CartDrawer({
                       </button>
                     </div>
                   </div>
-                  <p>{formatCurrency(product.price * quantity)}</p>
+                  <div className="cart-line-total">
+                    <small>Line total</small>
+                    <strong>{formatCurrency(product.price * quantity)}</strong>
+                  </div>
                 </div>
               ))}
             </div>
@@ -2904,35 +3048,313 @@ function CartDrawer({
   );
 }
 
+function CheckoutSteps({ activeStep }) {
+  const steps = ["Cart", "Details", "Payment"];
+  return (
+    <ol className="checkout-steps" aria-label="Checkout progress">
+      {steps.map((step, index) => {
+        const stepNumber = index + 1;
+        const complete = stepNumber < activeStep;
+        const active = stepNumber === activeStep;
+        return (
+          <li
+            key={step}
+            className={`${complete ? "is-complete" : ""} ${
+              active ? "is-active" : ""
+            }`}
+            aria-current={active ? "step" : undefined}
+          >
+            <span>{complete ? <Check size={14} /> : stepNumber}</span>
+            <strong>{step}</strong>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function CheckoutField({
+  label,
+  name,
+  value,
+  error,
+  note,
+  noteTone,
+  wide = false,
+  onChange,
+  onBlur,
+  ...inputProps
+}) {
+  const inputId = `checkout-${name}`;
+  const messageId = `${inputId}-message`;
+  return (
+    <label
+      className={`field ${wide ? "field-wide" : ""} ${
+        error ? "has-error" : ""
+      }`}
+    >
+      <span>{label}</span>
+      <input
+        {...inputProps}
+        id={inputId}
+        name={name}
+        value={value}
+        onChange={onChange}
+        onBlur={onBlur}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error || note ? messageId : undefined}
+      />
+      {(error || note) && (
+        <small
+          id={messageId}
+          className={error ? "field-error" : `field-note is-${noteTone || "info"}`}
+          role={error ? "alert" : "status"}
+          aria-live={error ? "assertive" : "polite"}
+        >
+          {error || note}
+        </small>
+      )}
+    </label>
+  );
+}
+
 function Checkout({
   items,
   subtotal,
   shipping,
   total,
   settings,
+  onUpdate,
   onClose,
   onComplete,
 }) {
   const [paymentMethod, setPaymentMethod] = useState("online");
+  const [customer, setCustomer] = useState(storedCheckoutDetails);
+  const [touched, setTouched] = useState({});
+  const [fieldErrors, setFieldErrors] = useState({});
+  const autoFilledLocation = useRef({ city: "", state: "" });
+  const [pincodeStatus, setPincodeStatus] = useState("idle");
+  const [pincodeResult, setPincodeResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    const hasDraft = CHECKOUT_FIELD_NAMES.some((field) => customer[field]);
+    if (hasDraft) {
+      sessionStorage.setItem(CHECKOUT_DRAFT_KEY, JSON.stringify(customer));
+    } else {
+      sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
+    }
+  }, [customer]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const focusFrame = window.requestAnimationFrame(() => {
+      dialogRef.current?.querySelector("#checkout-name")?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.requestAnimationFrame(() => {
+        const fallback = document.querySelector(
+          'button[aria-label^="Open cart with"]',
+        );
+        const focusTarget =
+          previousFocus instanceof HTMLElement &&
+          previousFocus !== document.body &&
+          previousFocus.isConnected
+            ? previousFocus
+            : fallback;
+        focusTarget?.focus();
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!busy) return undefined;
+    const keepCheckoutOpen = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", keepCheckoutOpen, true);
+    return () => window.removeEventListener("keydown", keepCheckoutOpen, true);
+  }, [busy]);
+
+  useEffect(() => {
+    const pincode = customer.pincode;
+    setPincodeResult(null);
+    if (!pincode) {
+      setPincodeStatus("idle");
+      return undefined;
+    }
+    if (pincode.length < 6) {
+      setPincodeStatus("typing");
+      return undefined;
+    }
+    if (!/^[1-9]\d{5}$/.test(pincode)) {
+      setPincodeStatus("invalid");
+      setFieldErrors((current) => ({
+        ...current,
+        pincode: "Enter a valid 6-digit Indian PIN code.",
+      }));
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setPincodeStatus("checking");
+      lookupPincode(pincode, { signal: controller.signal })
+        .then((lookup) => {
+          setPincodeStatus("valid");
+          setPincodeResult(lookup);
+          setCustomer((current) => {
+            if (current.pincode !== pincode) return current;
+            const previous = autoFilledLocation.current;
+            const city =
+              !current.city.trim() || current.city === previous.city
+                ? lookup.city || current.city
+                : current.city;
+            const state =
+              !current.state.trim() || current.state === previous.state
+                ? lookup.state || current.state
+                : current.state;
+            autoFilledLocation.current = {
+              city: lookup.city || "",
+              state: lookup.state || "",
+            };
+            return { ...current, city, state };
+          });
+          setFieldErrors((current) => {
+            const next = { ...current };
+            delete next.pincode;
+            delete next.city;
+            delete next.state;
+            return next;
+          });
+        })
+        .catch((lookupError) => {
+          if (lookupError.name === "AbortError") return;
+          if (lookupError.code === "PINCODE_NOT_FOUND") {
+            setPincodeStatus("invalid");
+            setFieldErrors((current) => ({
+              ...current,
+              pincode: lookupError.message,
+            }));
+            return;
+          }
+          setPincodeStatus("unavailable");
+        });
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [customer.pincode]);
+
+  const detailsComplete =
+    CHECKOUT_FIELD_NAMES.every(
+      (field) => !checkoutFieldError(field, customer[field]),
+    ) && ["valid", "unavailable"].includes(pincodeStatus);
+  const activeStep = detailsComplete ? 3 : 2;
+
+  const updateCustomer = (event) => {
+    const { name } = event.target;
+    const value = ["phone", "pincode"].includes(name)
+      ? event.target.value.replace(/\D/g, "").slice(0, name === "phone" ? 10 : 6)
+      : event.target.value;
+    setCustomer((current) => ({ ...current, [name]: value }));
+    setError("");
+    if (touched[name] || fieldErrors[name]) {
+      setFieldErrors((current) => ({
+        ...current,
+        [name]: checkoutFieldError(name, value),
+      }));
+    }
+  };
+
+  const blurCustomerField = (event) => {
+    const { name, value } = event.target;
+    setTouched((current) => ({ ...current, [name]: true }));
+    setFieldErrors((current) => ({
+      ...current,
+      [name]: checkoutFieldError(name, value),
+    }));
+  };
+
+  const validateDetails = () => {
+    const nextErrors = CHECKOUT_FIELD_NAMES.reduce((errors, field) => {
+      const message = checkoutFieldError(field, customer[field]);
+      if (message) errors[field] = message;
+      return errors;
+    }, {});
+    if (pincodeStatus === "invalid") {
+      nextErrors.pincode =
+        fieldErrors.pincode || "We could not validate that PIN code.";
+    }
+    setTouched(
+      CHECKOUT_FIELD_NAMES.reduce(
+        (fields, field) => ({ ...fields, [field]: true }),
+        {},
+      ),
+    );
+    setFieldErrors(nextErrors);
+    const firstInvalid = CHECKOUT_FIELD_NAMES.find(
+      (field) => nextErrors[field],
+    );
+    if (firstInvalid) {
+      window.requestAnimationFrame(() =>
+        document.getElementById(`checkout-${firstInvalid}`)?.focus(),
+      );
+    }
+    return !firstInvalid;
+  };
+
+  const requestClose = () => {
+    if (!busy) onClose();
+  };
+
+  const handleDialogKeyDown = (event) => {
+    if (event.key !== "Tab") return;
+    const focusable = [
+      ...dialogRef.current.querySelectorAll(
+        'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+      ),
+    ].filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError("");
-    const form = event.currentTarget;
-    if (!form.checkValidity()) {
-      form.reportValidity();
+    if (!validateDetails()) return;
+    if (["idle", "typing", "checking"].includes(pincodeStatus)) {
+      setError("Please wait a moment while we validate your PIN code.");
       return;
     }
 
-    const data = new FormData(form);
-    const customer = Object.fromEntries(data.entries());
     setBusy(true);
     try {
       const order = await submitCheckout({
-        customer,
+        customer: CHECKOUT_FIELD_NAMES.reduce(
+          (details, field) => ({
+            ...details,
+            [field]: customer[field].trim(),
+          }),
+          {},
+        ),
         items: items.map(({ product, quantity }) => ({
           id: product.id,
           asin: product.asin,
@@ -2943,6 +3365,7 @@ function Checkout({
         totals: { subtotal, shipping, total },
         paymentMethod,
       });
+      sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
       setResult(order);
       onComplete();
     } catch (checkoutError) {
@@ -2952,24 +3375,46 @@ function Checkout({
     }
   };
 
+  const pincodeNote =
+    pincodeStatus === "typing"
+      ? "Enter all 6 digits to auto-fill city and state."
+      : pincodeStatus === "checking"
+        ? "Checking this PIN code…"
+        : pincodeStatus === "valid"
+          ? `${pincodeResult?.city}, ${pincodeResult?.state} found. Please verify the auto-filled details.`
+          : pincodeStatus === "unavailable"
+            ? "Auto-fill is temporarily unavailable. Enter city and state manually."
+            : "";
+  const pincodeNoteTone =
+    pincodeStatus === "valid"
+      ? "success"
+      : pincodeStatus === "unavailable"
+        ? "warning"
+        : "info";
+
   return (
     <div className="modal-wrap">
       <button
         className="overlay-backdrop"
         type="button"
         aria-label="Close checkout"
-        onClick={onClose}
+        onClick={requestClose}
+        disabled={busy}
       />
       <div
         className="checkout-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="checkout-title"
+        aria-busy={busy}
+        ref={dialogRef}
+        onKeyDown={handleDialogKeyDown}
       >
         <button
           className="modal-close"
           type="button"
-          onClick={onClose}
+          onClick={requestClose}
+          disabled={busy}
           aria-label="Close checkout"
         >
           <X size={21} />
@@ -3007,190 +3452,299 @@ function Checkout({
             </button>
           </div>
         ) : (
-          <div className="checkout-grid">
-            <form className="checkout-form" onSubmit={handleSubmit}>
-              <div className="checkout-title">
-                <p className="eyebrow">Secure checkout</p>
-                <h2 id="checkout-title">Where should we send it?</h2>
-                {!commerceConfigured && (
-                  <span className="preview-pill">
-                    <Zap size={14} /> Preview mode
-                  </span>
-                )}
-              </div>
-              <div className="form-section">
-                <h3>Contact</h3>
-                <div className="field-grid">
-                  <label className="field field-wide">
-                    <span>Full name</span>
-                    <input name="name" required autoComplete="name" />
-                  </label>
-                  <label className="field">
-                    <span>Mobile number</span>
-                    <input
+          <>
+            <CheckoutSteps activeStep={activeStep} />
+            <div className="checkout-grid">
+              <form
+                className="checkout-form"
+                onSubmit={handleSubmit}
+                noValidate
+              >
+                <div className="checkout-title">
+                  <p className="eyebrow">Secure checkout</p>
+                  <h2 id="checkout-title">Where should we send it?</h2>
+                  {!commerceConfigured && (
+                    <span className="preview-pill">
+                      <Zap size={14} /> Preview mode
+                    </span>
+                  )}
+                </div>
+                <div className="form-section">
+                  <h3>Contact</h3>
+                  <div className="field-grid">
+                    <CheckoutField
+                      label="Full name"
+                      name="name"
+                      value={customer.name}
+                      error={fieldErrors.name}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
+                      autoComplete="name"
+                      wide
+                    />
+                    <CheckoutField
+                      label="Mobile number"
                       name="phone"
-                      required
+                      value={customer.phone}
+                      error={fieldErrors.phone}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
                       inputMode="numeric"
-                      minLength="10"
-                      maxLength="10"
-                      pattern="[0-9]{10}"
                       autoComplete="tel"
                     />
-                  </label>
-                  <label className="field">
-                    <span>Email</span>
-                    <input name="email" required type="email" autoComplete="email" />
-                  </label>
+                    <CheckoutField
+                      label="Email"
+                      name="email"
+                      value={customer.email}
+                      error={fieldErrors.email}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
+                      type="email"
+                      autoComplete="email"
+                    />
+                  </div>
                 </div>
-              </div>
-              <div className="form-section">
-                <h3>Delivery address</h3>
-                <div className="field-grid">
-                  <label className="field field-wide">
-                    <span>Flat, house, building</span>
-                    <input
+                <div className="form-section">
+                  <h3>Delivery address</h3>
+                  <div className="field-grid">
+                    <CheckoutField
+                      label="Flat, house, building"
                       name="address"
-                      required
+                      value={customer.address}
+                      error={fieldErrors.address}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
                       autoComplete="address-line1"
+                      wide
                     />
-                  </label>
-                  <label className="field field-wide">
-                    <span>Area, road, landmark</span>
-                    <input name="area" required autoComplete="address-line2" />
-                  </label>
-                  <label className="field">
-                    <span>City</span>
-                    <input name="city" required autoComplete="address-level2" />
-                  </label>
-                  <label className="field">
-                    <span>State</span>
-                    <input name="state" required autoComplete="address-level1" />
-                  </label>
-                  <label className="field">
-                    <span>PIN code</span>
-                    <input
+                    <CheckoutField
+                      label="Area, road, landmark"
+                      name="area"
+                      value={customer.area}
+                      error={fieldErrors.area}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
+                      autoComplete="address-line2"
+                      wide
+                    />
+                    <CheckoutField
+                      label="PIN code"
                       name="pincode"
-                      required
+                      value={customer.pincode}
+                      error={fieldErrors.pincode}
+                      note={pincodeNote}
+                      noteTone={pincodeNoteTone}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
                       inputMode="numeric"
-                      pattern="[0-9]{6}"
-                      minLength="6"
-                      maxLength="6"
                       autoComplete="postal-code"
+                      wide
                     />
-                  </label>
-                </div>
-              </div>
-              <div className="form-section">
-                <h3>Payment</h3>
-                <div className="payment-options">
-                  <label
-                    className={paymentMethod === "online" ? "selected" : ""}
-                  >
-                    <input
-                      type="radio"
-                      name="payment"
-                      value="online"
-                      checked={paymentMethod === "online"}
-                      onChange={() => setPaymentMethod("online")}
+                    <CheckoutField
+                      label="City / district"
+                      name="city"
+                      value={customer.city}
+                      error={fieldErrors.city}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
+                      autoComplete="address-level2"
                     />
-                    <span className="payment-icon">
-                      <CreditCard size={20} />
-                    </span>
-                    <span>
-                      <strong>Pay online</strong>
-                      <small>
-                        UPI, cards & net banking · secured by Razorpay
-                      </small>
-                    </span>
-                    <i>{paymentMethod === "online" && <Check size={15} />}</i>
-                  </label>
-                  <label className={paymentMethod === "cod" ? "selected" : ""}>
-                    <input
-                      type="radio"
-                      name="payment"
-                      value="cod"
-                      checked={paymentMethod === "cod"}
-                      onChange={() => setPaymentMethod("cod")}
+                    <CheckoutField
+                      label="State"
+                      name="state"
+                      value={customer.state}
+                      error={fieldErrors.state}
+                      onChange={updateCustomer}
+                      onBlur={blurCustomerField}
+                      autoComplete="address-level1"
                     />
-                    <span className="payment-icon">
-                      <Banknote size={20} />
-                    </span>
-                    <span>
-                      <strong>Cash on delivery</strong>
-                      <small>Pay when your parcel arrives</small>
-                    </span>
-                    <i>{paymentMethod === "cod" && <Check size={15} />}</i>
-                  </label>
-                </div>
-                <div className="checkout-payment-reassurance">
-                  <ShieldCheck size={18} />
-                  <p>
-                    <strong>
-                      Online payments are processed securely by Razorpay.
-                    </strong>
-                    Eligible returns or replacements can be requested within{" "}
-                    {settings.returns.windowDays} days. Approved refunds
-                    generally reflect within 5–7 business days.
+                  </div>
+                  <p className="checkout-draft-note">
+                    Details are kept only in this browser tab, so closing
+                    checkout does not erase your progress.
                   </p>
                 </div>
-              </div>
-              {error && <div className="checkout-error">{error}</div>}
-              <button
-                className="button button-primary place-order"
-                type="submit"
-                disabled={busy}
-              >
-                {busy
-                  ? "Starting secure checkout…"
-                  : commerceConfigured
-                    ? `Place order · ${formatCurrency(total)}`
-                    : `Preview order · ${formatCurrency(total)}`}
-                {!busy && <LockKeyhole size={17} />}
-              </button>
-              <p className="checkout-consent">
-                By continuing, you agree to the store terms and return policy.
-              </p>
-            </form>
-            <aside className="checkout-summary">
-              <p className="eyebrow">Order summary</p>
-              <div className="checkout-items">
-                {items.map(({ product, quantity }) => (
-                  <div key={product.id}>
-                    <span className="checkout-thumb">
-                      <img src={product.image} alt="" />
-                      <b>{quantity}</b>
-                    </span>
-                    <p>
-                      <strong>{product.name}</strong>
-                      <small>{product.category}</small>
-                    </p>
-                    <span>{formatCurrency(product.price * quantity)}</span>
+                <div className="form-section checkout-payment-section">
+                  <h3>Payment</h3>
+                  <div className="payment-options">
+                    <label
+                      className={paymentMethod === "online" ? "selected" : ""}
+                    >
+                      <input
+                        type="radio"
+                        name="payment"
+                        value="online"
+                        checked={paymentMethod === "online"}
+                        onChange={() => setPaymentMethod("online")}
+                      />
+                      <span className="payment-icon">
+                        <CreditCard size={20} />
+                      </span>
+                      <span className="payment-option-copy">
+                        <span className="payment-option-heading">
+                          <strong>Pay online</strong>
+                          <em>Instant confirmation</em>
+                        </span>
+                        <small>
+                          UPI, cards and net banking · secured by Razorpay
+                        </small>
+                        <span className="payment-benefits">
+                          <b>₹0 payment fee</b>
+                          <b>Same delivery charge</b>
+                        </span>
+                      </span>
+                      <i>{paymentMethod === "online" && <Check size={15} />}</i>
+                    </label>
+                    <label
+                      className={paymentMethod === "cod" ? "selected" : ""}
+                    >
+                      <input
+                        type="radio"
+                        name="payment"
+                        value="cod"
+                        checked={paymentMethod === "cod"}
+                        onChange={() => setPaymentMethod("cod")}
+                      />
+                      <span className="payment-icon">
+                        <Banknote size={20} />
+                      </span>
+                      <span className="payment-option-copy">
+                        <span className="payment-option-heading">
+                          <strong>Cash on delivery</strong>
+                          <em>Pay at your door</em>
+                        </span>
+                        <small>Pay the courier when your parcel arrives</small>
+                        <span className="payment-benefits">
+                          <b>₹0 COD fee</b>
+                          <b>Courier confirmation required</b>
+                        </span>
+                      </span>
+                      <i>{paymentMethod === "cod" && <Check size={15} />}</i>
+                    </label>
                   </div>
-                ))}
-              </div>
-              <div className="checkout-totals">
-                <p>
-                  <span>Subtotal</span>
-                  <strong>{formatCurrency(subtotal)}</strong>
+                  <div
+                    className={`payment-comparison is-${paymentMethod}`}
+                    aria-live="polite"
+                  >
+                    <CheckCircle2 size={18} />
+                    <p>
+                      <strong>
+                        {paymentMethod === "online"
+                          ? "Choose online for immediate payment confirmation."
+                          : "Choose COD if you prefer paying after the parcel arrives."}
+                      </strong>{" "}
+                      {paymentMethod === "online"
+                        ? "There is currently no additional payment fee."
+                        : "Final COD availability depends on courier serviceability for your PIN code and is confirmed during order processing."}
+                    </p>
+                  </div>
+                  <div className="checkout-payment-reassurance">
+                    <ShieldCheck size={18} />
+                    <p>
+                      <strong>
+                        {paymentMethod === "online"
+                          ? "Online payment is processed securely by Razorpay."
+                          : "No online payment is collected for a COD order."}
+                      </strong>
+                      Eligible returns or replacements can be requested within{" "}
+                      {settings.returns.windowDays} days. Approved refunds
+                      generally reflect within 5–7 business days.
+                    </p>
+                  </div>
+                </div>
+                {error && (
+                  <div className="checkout-error" role="alert">
+                    {error}
+                  </div>
+                )}
+                <button
+                  className="button button-primary place-order"
+                  type="submit"
+                  disabled={busy || pincodeStatus === "checking"}
+                >
+                  {busy
+                    ? "Starting secure checkout…"
+                    : pincodeStatus === "checking"
+                      ? "Checking PIN code…"
+                      : commerceConfigured
+                        ? `Place order · ${formatCurrency(total)}`
+                        : `Preview order · ${formatCurrency(total)}`}
+                  {!busy && pincodeStatus !== "checking" && (
+                    <LockKeyhole size={17} />
+                  )}
+                </button>
+                <p className="checkout-consent">
+                  By continuing, you agree to the store terms and return policy.
                 </p>
-                <p>
-                  <span>Shipping</span>
-                  <strong>{shipping ? formatCurrency(shipping) : "FREE"}</strong>
-                </p>
-                <p>
-                  <span>Total</span>
-                  <strong>{formatCurrency(total)}</strong>
-                </p>
-              </div>
-              <div className="secure-note">
-                <ShieldCheck size={19} />
-                <span>
-                  <strong>Secure transaction</strong>
-                  Payment details are handled by Razorpay.
-                </span>
-              </div>
-            </aside>
-          </div>
+              </form>
+              <aside className="checkout-summary">
+                <p className="eyebrow">Order summary</p>
+                <div className="checkout-items">
+                  {items.map(({ product, quantity }) => (
+                    <div key={product.id}>
+                      <span className="checkout-thumb">
+                        <img src={product.image} alt="" />
+                        <b>{quantity}</b>
+                      </span>
+                      <div className="checkout-item-copy">
+                        <strong>{product.name}</strong>
+                        <small>{product.category}</small>
+                        <div className="checkout-item-actions">
+                          <Quantity
+                            value={quantity}
+                            onChange={(next) => onUpdate(product.id, next)}
+                            label={`${product.name} checkout quantity`}
+                            max={Math.min(
+                              10,
+                              Number(product.inventory ?? 10),
+                            )}
+                          />
+                          {items.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => onUpdate(product.id, 0)}
+                              aria-label={`Remove ${product.name} from order`}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="checkout-item-total">
+                        <small>Line total</small>
+                        <strong>
+                          {formatCurrency(product.price * quantity)}
+                        </strong>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="checkout-totals">
+                  <p>
+                    <span>Subtotal</span>
+                    <strong>{formatCurrency(subtotal)}</strong>
+                  </p>
+                  <p>
+                    <span>Shipping</span>
+                    <strong>{shipping ? formatCurrency(shipping) : "FREE"}</strong>
+                  </p>
+                  <p>
+                    <span>Total</span>
+                    <strong>{formatCurrency(total)}</strong>
+                  </p>
+                </div>
+                <div className="secure-note">
+                  <ShieldCheck size={19} />
+                  <span>
+                    <strong>Secure transaction</strong>
+                    {paymentMethod === "online"
+                      ? "Payment details are handled by Razorpay."
+                      : "Payment is collected by the courier at delivery."}
+                  </span>
+                </div>
+              </aside>
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -3346,7 +3900,7 @@ function Faq({ settings }) {
     ],
     [
       "Can I pay cash on delivery?",
-      "Yes. COD is available for eligible serviceable PIN codes. Online payments through UPI, cards, wallets and net banking are processed securely by Razorpay.",
+      "You can request COD at checkout. Final availability depends on courier serviceability for your PIN code and is confirmed during order processing. Online payments through UPI, cards, wallets and net banking are processed securely by Razorpay.",
     ],
     [
       "Will a car accessory fit my vehicle?",

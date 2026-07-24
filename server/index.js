@@ -10,6 +10,7 @@ import {
   updateOrderRecord,
 } from "./order-store.js";
 import { decrementInventory, getProducts } from "./product-store.js";
+import { lookupIndianPincode } from "./pincode.js";
 import { createShiprocketShipment } from "./shiprocket.js";
 import {
   getStoreSettings,
@@ -55,14 +56,22 @@ const requireText = (value, field, minLength = 1) => {
 
 const validateCustomer = (input = {}) => {
   const phone = requireText(input.phone, "mobile number", 10);
+  const email = requireText(input.email, "email", 5);
   const pincode = requireText(input.pincode, "PIN code", 6);
-  if (!/^\d{10}$/.test(phone)) throw new Error("Mobile number must be 10 digits.");
-  if (!/^\d{6}$/.test(pincode)) throw new Error("PIN code must be 6 digits.");
+  if (!/^[6-9]\d{9}$/.test(phone)) {
+    throw new Error("Enter a valid 10-digit Indian mobile number.");
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.");
+  }
+  if (!/^[1-9]\d{5}$/.test(pincode)) {
+    throw new Error("Enter a valid 6-digit Indian PIN code.");
+  }
 
   return {
     name: requireText(input.name, "name", 2),
     phone,
-    email: requireText(input.email, "email", 5),
+    email,
     address: requireText(input.address, "address", 3),
     area: requireText(input.area, "area", 2),
     city: requireText(input.city, "city", 2),
@@ -165,14 +174,65 @@ app.get("/api/catalog", async (_request, response) => {
   });
 });
 
+app.get("/api/pincode/:pincode", async (request, response) => {
+  try {
+    const result = await lookupIndianPincode(request.params.pincode);
+    if (!result) {
+      response.status(404).json({
+        valid: false,
+        message: "We could not find that PIN code. Check the six digits.",
+      });
+      return;
+    }
+    response.json({ valid: true, ...result });
+  } catch (error) {
+    const status =
+      error.code === "INVALID_PINCODE"
+        ? 400
+        : error.code === "PINCODE_LOOKUP_UNAVAILABLE"
+          ? 503
+          : 500;
+    response.status(status).json({
+      valid: status >= 500 ? null : false,
+      message: error.message || "PIN lookup could not be completed.",
+    });
+  }
+});
+
 app.use("/api/admin", adminRouter);
 
 app.post("/api/checkout", async (request, response) => {
   try {
     const customer = validateCustomer(request.body.customer);
-    const totals = await priceOrder(request.body.items);
     const paymentMethod =
       request.body.paymentMethod === "cod" ? "cod" : "online";
+    try {
+      const postalRecord = await lookupIndianPincode(customer.pincode);
+      if (!postalRecord) {
+        throw new Error(
+          "We could not find that PIN code in the postal directory.",
+        );
+      }
+      if (
+        paymentMethod === "cod" &&
+        Number(postalRecord.deliveryPostOffices || 0) === 0
+      ) {
+        throw new Error(
+          "COD could not be verified for this PIN code. Choose online payment or contact support.",
+        );
+      }
+    } catch (pincodeError) {
+      if (pincodeError.code !== "PINCODE_LOOKUP_UNAVAILABLE") {
+        throw pincodeError;
+      }
+      if (paymentMethod === "cod") {
+        throw new Error(
+          "COD PIN verification is temporarily unavailable. Choose online payment or try again shortly.",
+        );
+      }
+      // A postal-directory outage should not block a manual address.
+    }
+    const totals = await priceOrder(request.body.items);
     const orderId = internalOrderId();
 
     const order = await createOrderRecord({
