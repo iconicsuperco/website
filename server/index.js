@@ -24,6 +24,9 @@ const projectRoot = path.resolve(currentDirectory, "..");
 app.disable("x-powered-by");
 app.use(express.json({ limit: "100kb" }));
 app.use((request, response, next) => {
+  if (request.path.startsWith("/api/")) {
+    response.header("Cache-Control", "no-store, max-age=0");
+  }
   const allowedOrigin = process.env.STORE_ORIGIN;
   if (allowedOrigin && request.headers.origin === allowedOrigin) {
     response.header("Access-Control-Allow-Origin", allowedOrigin);

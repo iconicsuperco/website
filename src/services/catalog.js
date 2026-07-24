@@ -38,6 +38,7 @@ const withDefaults = (settings = {}) => ({
 
 export async function loadCatalog() {
   const response = await fetch(catalogEndpoint(), {
+    cache: "no-store",
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new Error("Live catalog is unavailable.");

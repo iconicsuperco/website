@@ -24,7 +24,12 @@
     <title>Kelenate — Practical products for everyday life</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="app-boot" role="status" aria-live="polite">
+        <span class="app-boot__mark" aria-hidden="true"></span>
+        <span>Loading Kelenate…</span>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
