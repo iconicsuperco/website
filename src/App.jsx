@@ -76,6 +76,81 @@ const productIdFromPath = (pathname) => {
   }
 };
 
+const PRODUCT_OUTCOMES = {
+  "habit-tracker":
+    "See your streak at a glance, so one missed day does not turn into an abandoned goal.",
+  "comic-gift-stickers":
+    "Turn a plain gift or parcel into something that feels considered in seconds.",
+  "number-alphabet-labels":
+    "Make sorting, teaching and organising visual enough to understand at a glance.",
+  "spice-jar-labels":
+    "Find the right masala faster and make mismatched jars feel like one organised set.",
+  "blood-pressure-log":
+    "Keep every reading in one clear place, so doctor visits start with useful history.",
+  "blood-sugar-log":
+    "Turn scattered glucose readings into a weekly record that is easier to discuss and act on.",
+  "thermal-labels":
+    "Label daily orders quickly without ink, ribbon or handwritten dispatch slips.",
+  "moving-labels":
+    "Know which box belongs in which room before unpacking turns chaotic.",
+  "laminated-envelopes":
+    "Send documents in a cleaner, sturdier outer layer made for everyday dispatch.",
+  "flash-cards":
+    "Turn short facts and prompts into a stack you can revise wherever you are.",
+  "shock-absorbers":
+    "Soften small door contacts and reduce the sharp noise of everyday closing.",
+  "microfiber-cloths":
+    "Lift dust and wipe surfaces without reaching for a different cloth every time.",
+  "door-edge-guard":
+    "Help stop exposed door edges from chipping when parking spaces get tight.",
+  "door-handle-protectors":
+    "Take everyday fingernail and key contact before your car paint does.",
+  "door-sill-protector":
+    "Protect the entry strip from the scuffs that build up every time people step in.",
+  "reflective-stripes":
+    "Make your vehicle easier to notice after dark while adding a clean reflective accent.",
+  "wheel-rim-decals":
+    "Give wheels a sharper night-time outline without committing to paint.",
+};
+
+const CATEGORY_OUTCOMES = {
+  "Car protection":
+    "Protect the high-contact areas that collect everyday marks before the damage builds up.",
+  "Reflective styling":
+    "Add a cleaner reflective accent that becomes more visible when light hits it after dark.",
+  "Stickers & labels":
+    "Make everyday organising faster by giving each item a clear visual place.",
+  "Planning & logs":
+    "Turn scattered daily information into a record you can understand at a glance.",
+  "Business supplies":
+    "Remove one repetitive step from packing, labelling or everyday desk work.",
+};
+
+const PRODUCT_PAIRINGS = {
+  "habit-tracker": ["flash-cards", "blood-pressure-log"],
+  "comic-gift-stickers": ["laminated-envelopes", "moving-labels"],
+  "number-alphabet-labels": ["flash-cards", "moving-labels"],
+  "spice-jar-labels": ["microfiber-cloths", "number-alphabet-labels"],
+  "blood-pressure-log": ["blood-sugar-log", "habit-tracker"],
+  "blood-sugar-log": ["blood-pressure-log", "habit-tracker"],
+  "thermal-labels": ["moving-labels", "laminated-envelopes"],
+  "moving-labels": ["laminated-envelopes", "thermal-labels"],
+  "laminated-envelopes": ["thermal-labels", "moving-labels"],
+  "flash-cards": ["number-alphabet-labels", "habit-tracker"],
+  "shock-absorbers": ["door-edge-guard", "microfiber-cloths"],
+  "microfiber-cloths": ["door-handle-protectors", "door-sill-protector"],
+  "door-edge-guard": ["shock-absorbers", "microfiber-cloths"],
+  "door-handle-protectors": ["microfiber-cloths", "door-edge-guard"],
+  "door-sill-protector": ["microfiber-cloths", "door-handle-protectors"],
+  "reflective-stripes": ["wheel-rim-decals", "microfiber-cloths"],
+  "wheel-rim-decals": ["reflective-stripes", "microfiber-cloths"],
+};
+
+const outcomeFor = (product) =>
+  PRODUCT_OUTCOMES[product.id] ||
+  CATEGORY_OUTCOMES[product.category] ||
+  product.short;
+
 const policiesFor = (settings) => ({
   shipping: {
     eyebrow: "Shipping & delivery",
@@ -1929,7 +2004,9 @@ function ProductPage({
   const [pincode, setPincode] = useState("");
   const [deliveryState, setDeliveryState] = useState(null);
   const purchaseRef = useRef(null);
-  const soldOut = Number(product.inventory ?? 1) <= 0;
+  const inventory = Number(product.inventory ?? 1);
+  const soldOut = inventory <= 0;
+  const lowStock = inventory > 0 && inventory <= 8;
   const related = [
     ...catalog.filter(
       (item) => item.id !== product.id && item.category === product.category,
@@ -1938,6 +2015,16 @@ function ProductPage({
       (item) => item.id !== product.id && item.category !== product.category,
     ),
   ].slice(0, 4);
+  const preferredPairings = (PRODUCT_PAIRINGS[product.id] || [])
+    .map((productId) => catalog.find((item) => item.id === productId))
+    .filter(Boolean);
+  const frequentlyBought = [...preferredPairings, ...related]
+    .filter(
+      (item, index, items) =>
+        Number(item.inventory ?? 1) > 0 &&
+        items.findIndex((candidate) => candidate.id === item.id) === index,
+    )
+    .slice(0, 2);
 
   useEffect(() => {
     const purchase = purchaseRef.current;
@@ -2072,6 +2159,7 @@ function ProductPage({
             <span>You save {formatCurrency(product.mrp - product.price)}</span>
           </div>
           <p className="pdp-tax">Inclusive of all taxes</p>
+          <p className="pdp-outcome">{outcomeFor(product)}</p>
           <p className="pdp-description">{product.short}</p>
 
           {product.highlights?.length > 0 && (
@@ -2085,12 +2173,53 @@ function ProductPage({
             </ul>
           )}
 
-          <div className={`pdp-stock ${soldOut ? "is-sold-out" : ""}`}>
+          <div
+            className={`pdp-stock ${
+              soldOut ? "is-sold-out" : lowStock ? "is-low-stock" : ""
+            }`}
+          >
             <span />
             {soldOut
               ? "Currently unavailable"
-              : "In stock and ready to dispatch"}
+              : lowStock
+                ? `Only ${inventory} left in this batch`
+                : "In stock · normally dispatches in 1–2 business days"}
           </div>
+
+          <form className="delivery-check" onSubmit={checkDelivery}>
+            <MapPin size={19} />
+            <div>
+              <label htmlFor={`delivery-${product.id}`}>
+                Check delivery before you buy
+              </label>
+              <div className="delivery-check__input">
+                <input
+                  id={`delivery-${product.id}`}
+                  value={pincode}
+                  onChange={(event) => {
+                    setPincode(event.target.value.replace(/\D/g, "").slice(0, 6));
+                    setDeliveryState(null);
+                  }}
+                  inputMode="numeric"
+                  autoComplete="postal-code"
+                  placeholder="Enter 6-digit PIN code"
+                  aria-describedby={`delivery-note-${product.id}`}
+                />
+                <button type="submit">Check</button>
+              </div>
+              <small
+                id={`delivery-note-${product.id}`}
+                className={deliveryState ? `is-${deliveryState}` : ""}
+              >
+                {deliveryState === "ready" &&
+                  "Estimated in 3–7 business days. Exact serviceability is confirmed at checkout."}
+                {deliveryState === "invalid" &&
+                  "Please enter a valid 6-digit Indian PIN code."}
+                {!deliveryState &&
+                  "Get a quick estimate before choosing Buy now."}
+              </small>
+            </div>
+          </form>
 
           <div className="pdp-purchase" ref={purchaseRef}>
             <Quantity
@@ -2148,44 +2277,17 @@ function ProductPage({
               </span>
             </div>
           </div>
-
-          <form className="delivery-check" onSubmit={checkDelivery}>
-            <MapPin size={19} />
-            <div>
-              <label htmlFor={`delivery-${product.id}`}>Check delivery estimate</label>
-              <div className="delivery-check__input">
-                <input
-                  id={`delivery-${product.id}`}
-                  value={pincode}
-                  onChange={(event) => {
-                    setPincode(event.target.value.replace(/\D/g, "").slice(0, 6));
-                    setDeliveryState(null);
-                  }}
-                  inputMode="numeric"
-                  autoComplete="postal-code"
-                  placeholder="Enter 6-digit PIN code"
-                  aria-describedby={`delivery-note-${product.id}`}
-                />
-                <button type="submit">Check</button>
-              </div>
-              <small
-                id={`delivery-note-${product.id}`}
-                className={
-                  deliveryState ? `is-${deliveryState}` : ""
-                }
-              >
-                {deliveryState === "ready" &&
-                  "Estimated in 3–7 business days. Exact serviceability is confirmed at checkout."}
-                {deliveryState === "invalid" &&
-                  "Please enter a valid 6-digit Indian PIN code."}
-                {!deliveryState &&
-                  "Get a quick estimate before you add this item."}
-              </small>
-            </div>
-          </form>
-
         </div>
       </section>
+
+      {frequentlyBought.length > 0 && (
+        <ProductCrossSell
+          currentProduct={product}
+          products={frequentlyBought}
+          onProduct={onProduct}
+          onAdd={onAdd}
+        />
+      )}
 
       <section className="product-detail-section">
         <div className="container product-detail-grid">
@@ -2231,6 +2333,8 @@ function ProductPage({
           </div>
         </div>
       </section>
+
+      <ProductReviews product={product} />
 
       <section className="container product-service-strip">
         <div>
@@ -2291,6 +2395,184 @@ function ProductPage({
         </div>
       )}
     </main>
+  );
+}
+
+function CompactRecommendation({ product, onProduct, onAdd }) {
+  return (
+    <div className="cart-recommendation__product">
+      <button
+        className="cart-recommendation__image"
+        type="button"
+        onClick={() => onProduct(product)}
+        aria-label={`View ${product.name}`}
+      >
+        <img src={product.image} alt="" decoding="async" />
+      </button>
+      <button
+        className="cart-recommendation__copy"
+        type="button"
+        onClick={() => onProduct(product)}
+      >
+        <strong>{product.name}</strong>
+        <span>
+          {formatCurrency(product.price)}
+          {product.mrp > product.price && (
+            <small>Save {formatCurrency(product.mrp - product.price)}</small>
+          )}
+        </span>
+      </button>
+      <button
+        className="cart-recommendation__add"
+        type="button"
+        onClick={() => onAdd(product)}
+        aria-label={`Add ${product.name} to cart`}
+      >
+        <Plus size={16} /> Add
+      </button>
+    </div>
+  );
+}
+
+function ProductCrossSell({
+  currentProduct,
+  products,
+  onProduct,
+  onAdd,
+}) {
+  return (
+    <section className="pdp-cross-sell" aria-labelledby="cross-sell-title">
+      <div className="container pdp-cross-sell__inner">
+        <div className="pdp-cross-sell__heading">
+          <p className="eyebrow">Complete the setup</p>
+          <h2 id="cross-sell-title">Frequently bought with</h2>
+          <p>
+            Practical additions for the same job as {currentProduct.name}.
+            Items are added individually—no bundle discount is being claimed.
+          </p>
+        </div>
+        <div className="pdp-cross-sell__products">
+          {products.map((product) => (
+            <article key={product.id}>
+              <CompactRecommendation
+                product={product}
+                onProduct={onProduct}
+                onAdd={onAdd}
+              />
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProductReviews({ product }) {
+  const writtenReviews = Array.isArray(product.customerReviews)
+    ? product.customerReviews
+    : [];
+  const marketplaceUrl = product.asin
+    ? `https://www.amazon.in/dp/${encodeURIComponent(product.asin)}`
+    : null;
+
+  return (
+    <section className="pdp-reviews" aria-labelledby="pdp-reviews-title">
+      <div className="container">
+        <div className="pdp-reviews__heading">
+          <div>
+            <p className="eyebrow">Customer reviews</p>
+            <h2 id="pdp-reviews-title">Proof, with the source shown.</h2>
+          </div>
+          <p>
+            Marketplace ratings stay separate from direct-site reviews, so you
+            always know what the number represents.
+          </p>
+        </div>
+
+        <div className="pdp-reviews__grid">
+          <aside className="pdp-rating-summary">
+            {product.rating ? (
+              <>
+                <strong>{product.rating.toFixed(1)}</strong>
+                <div className="pdp-rating-summary__stars" aria-hidden="true">
+                  {[0, 1, 2, 3, 4].map((starIndex) => (
+                    <Star
+                      key={starIndex}
+                      size={18}
+                      fill={
+                        starIndex < Math.round(product.rating)
+                          ? "currentColor"
+                          : "none"
+                      }
+                    />
+                  ))}
+                </div>
+                <span>
+                  {product.reviews} marketplace{" "}
+                  {product.reviews === 1 ? "rating" : "ratings"}
+                </span>
+                <small>
+                  Imported from the Amazon listing. Last marketplace audit:
+                  23 July 2026.
+                </small>
+              </>
+            ) : (
+              <>
+                <Sparkles size={26} />
+                <strong className="pdp-rating-summary__new">New listing</strong>
+                <span>No marketplace rating imported yet</span>
+                <small>
+                  We do not display a placeholder score for unrated products.
+                </small>
+              </>
+            )}
+            {marketplaceUrl && (
+              <a href={marketplaceUrl} target="_blank" rel="noreferrer">
+                View the source listing <ArrowRight size={15} />
+              </a>
+            )}
+          </aside>
+
+          <div className="pdp-written-reviews">
+            {writtenReviews.length > 0 ? (
+              writtenReviews.map((review) => (
+                <article key={`${review.name}-${review.date || review.title}`}>
+                  <div>
+                    <strong>{review.name}</strong>
+                    <span>
+                      {review.rating}/5
+                      {review.verified ? " · Verified purchase" : ""}
+                    </span>
+                  </div>
+                  <h3>{review.title}</h3>
+                  <p>{review.body}</p>
+                  <small>
+                    {review.source || "Kelenate customer"}
+                    {review.date ? ` · ${review.date}` : ""}
+                  </small>
+                </article>
+              ))
+            ) : (
+              <div className="pdp-written-reviews__empty">
+                <BadgeCheck size={28} />
+                <p className="eyebrow">Written review status</p>
+                <h3>No unverified quotes.</h3>
+                <p>
+                  Named written reviews have not yet been imported for this
+                  listing. Until Kelenate supplies an approved marketplace
+                  export or a verified direct buyer submits feedback, we show
+                  the real aggregate above without generating testimonial copy.
+                </p>
+                <span>
+                  Verified written reviews will appear here with a name, source
+                  and purchase status.
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -2562,32 +2844,11 @@ function CartDrawer({
                   <span>One more useful thing</span>
                   <small>Closer to free delivery</small>
                 </div>
-                <div className="cart-recommendation__product">
-                  <button
-                    className="cart-recommendation__image"
-                    type="button"
-                    onClick={() => onProduct(recommendation)}
-                    aria-label={`View ${recommendation.name}`}
-                  >
-                    <img src={recommendation.image} alt="" />
-                  </button>
-                  <button
-                    className="cart-recommendation__copy"
-                    type="button"
-                    onClick={() => onProduct(recommendation)}
-                  >
-                    <strong>{recommendation.name}</strong>
-                    <span>{formatCurrency(recommendation.price)}</span>
-                  </button>
-                  <button
-                    className="cart-recommendation__add"
-                    type="button"
-                    onClick={() => onAdd(recommendation)}
-                    aria-label={`Add ${recommendation.name} to cart`}
-                  >
-                    <Plus size={16} /> Add
-                  </button>
-                </div>
+                <CompactRecommendation
+                  product={recommendation}
+                  onProduct={onProduct}
+                  onAdd={onAdd}
+                />
               </div>
             )}
 
